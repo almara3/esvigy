@@ -12,6 +12,8 @@ import pytest
 import esvigy
 
 KEY = "0123456789abcdef01234567"
+WEBP = b"RIFF\x10\x00\x00\x00WEBPVP8 fake"
+PUT_HEADERS = {"X-Esvigy": "1"}
 
 
 # ---------------------------------------------------------------- pages and listing
@@ -157,9 +159,9 @@ def test_localhost_is_accepted(server):
 # ---------------------------------------------------------------- thumbnail cache
 
 def test_thumb_roundtrip(server):
-    data = b"RIFF0000WEBPfake"
+    data = WEBP
     assert server.request("GET", f"/thumb/{KEY}.webp").status == 404
-    assert server.request("PUT", f"/thumb/{KEY}.webp", body=data).status == 204
+    assert server.request("PUT", f"/thumb/{KEY}.webp", body=data, headers=PUT_HEADERS).status == 204
     assert (server.cache / f"{KEY}.webp").read_bytes() == data
     r = server.request("GET", f"/thumb/{KEY}.webp")
     assert r.body == data
@@ -169,26 +171,26 @@ def test_thumb_roundtrip(server):
 
 def test_listing_reports_cached_thumbs(server):
     key = next(f["key"] for f in server.get_json("/api/list")["files"] if f["name"] == "a.svg")
-    server.request("PUT", f"/thumb/{key}.webp", body=b"x")
+    server.request("PUT", f"/thumb/{key}.webp", body=WEBP, headers=PUT_HEADERS)
     a = next(f for f in server.get_json("/api/list")["files"] if f["name"] == "a.svg")
     assert a["thumb"] is True
 
 
 @pytest.mark.parametrize("name", ["..%2Fevil.webp", "short.webp", KEY + ".png", KEY.upper() + ".webp"])
 def test_thumb_put_rejects_bad_names(server, name):
-    assert server.request("PUT", "/thumb/" + name, body=b"x").status == 400
+    assert server.request("PUT", "/thumb/" + name, body=WEBP, headers=PUT_HEADERS).status == 400
     assert not server.cache.exists() or not any(server.cache.iterdir())
 
 
 def test_thumb_put_rejects_empty_and_huge(server):
-    assert server.request("PUT", f"/thumb/{KEY}.webp", body=b"").status == 400
+    assert server.request("PUT", f"/thumb/{KEY}.webp", body=b"", headers=PUT_HEADERS).status == 400
     too_big = str(esvigy.MAX_THUMB_BYTES + 1)
-    r = server.request("PUT", f"/thumb/{KEY}.webp", body=b"x", headers={"Content-Length": too_big})
+    r = server.request("PUT", f"/thumb/{KEY}.webp", body=b"x", headers={**PUT_HEADERS, "Content-Length": too_big})
     assert r.status == 400
 
 
 def test_put_elsewhere_is_not_found(server):
-    assert server.request("PUT", "/file/a.svg", body=b"x").status == 404
+    assert server.request("PUT", "/file/a.svg", body=b"x", headers=PUT_HEADERS).status == 404
 
 
 # ---------------------------------------------------------------- open folder dialog

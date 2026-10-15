@@ -3,6 +3,8 @@
 // ---------------------------------------------------------------- utilities
 
 const $ = (id) => document.getElementById(id);
+// Every server URL lives below the secret /<token>/ prefix the page was opened with.
+const BASE = location.pathname.replace(/[^/]*$/, "");
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -11,8 +13,8 @@ const el = (tag, cls, text) => {
 };
 const joinPath = (dir, name) => (dir ? dir + "/" + name : name);
 const encPath = (p) => p.split("/").map(encodeURIComponent).join("/");
-const fileUrl = (dir, f, fix) => "/file/" + encPath(joinPath(dir, f.name)) + (fix ? "?fix" : "");
-const thumbUrl = (f) => "/thumb/" + f.key + ".webp";
+const fileUrl = (dir, f, fix) => BASE + "file/" + encPath(joinPath(dir, f.name)) + (fix ? "?fix" : "");
+const thumbUrl = (f) => BASE + "thumb/" + f.key + ".webp";
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
 function fmtSize(n) {
@@ -36,7 +38,7 @@ const prefs = {
 const listCache = new Map();
 function list(dir) {
   if (!listCache.has(dir)) {
-    const p = fetch("/api/list?dir=" + encodeURIComponent(dir)).then((r) => {
+    const p = fetch(BASE + "api/list?dir=" + encodeURIComponent(dir)).then((r) => {
       if (!r.ok) throw new Error(r.status + " " + r.statusText);
       return r.json();
     });
@@ -344,7 +346,7 @@ const renderer = {
     this.ready = new Promise((resolve) => {
       this.frame = el("iframe");
       this.frame.hidden = true;
-      this.frame.src = this.origin + "/static/render.html";
+      this.frame.src = this.origin + BASE + "static/render.html";
       this.onReady = resolve;
       document.body.append(this.frame);
     });
@@ -743,7 +745,7 @@ async function openFolder() {
   const btn = $("open");
   btn.disabled = true;
   try {
-    const r = await fetch("/api/open", { method: "POST", headers: { "X-Esvigy": "1" } });
+    const r = await fetch(BASE + "api/open", { method: "POST", headers: { "X-Esvigy": "1" } });
     if (r.status === 204) return; // dialog cancelled
     if (!r.ok) { alert(await r.text()); return; }
     history.replaceState(null, "", "#");

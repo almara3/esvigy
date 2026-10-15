@@ -41,16 +41,19 @@ def cache(tmp_path, monkeypatch):
 
 @pytest.fixture
 def server(tree, cache):
-    """A running esvigy server over `tree`, with a helper to send raw requests."""
+    """A running esvigy server over `tree`, with a helper to send raw requests.
+
+    Paths are sent below the server's secret /<token> prefix unless `auth=False`.
+    """
     srv = esvigy.make_server(tree)
     t = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
     t.start()
     port = srv.server_port
 
-    def request(method, path, body=None, headers=None):
+    def request(method, path, body=None, headers=None, auth=True):
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
         try:
-            conn.request(method, path, body=body, headers=headers or {})
+            conn.request(method, ("/" + srv.token if auth else "") + path, body=body, headers=headers or {})
             r = conn.getresponse()
             return SimpleNamespace(status=r.status, headers=r.headers, body=r.read())
         finally:
@@ -61,7 +64,7 @@ def server(tree, cache):
         assert r.status == 200, r.body
         return json.loads(r.body)
 
-    yield SimpleNamespace(srv=srv, port=port, url=f"http://127.0.0.1:{port}/", root=tree, cache=cache,
+    yield SimpleNamespace(srv=srv, port=port, url=srv.url, root=tree, cache=cache,
                           request=request, get_json=get_json)
     srv.shutdown()
     srv.server_close()

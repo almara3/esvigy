@@ -8,9 +8,11 @@ Thumbnails are rendered once by the browser and cached on disk.
 import argparse
 import gzip
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -29,6 +31,9 @@ HEAD_BYTES = 64 * 1024
 MAX_THUMB_BYTES = 4 * 1024 * 1024
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                 ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml"}
+THUMB_NAME_RE = re.compile(r"[0-9a-f]{24}\.webp")
+# SVG can carry scripts; never let it run anything when opened directly.
+SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox"
 
 SVG_TAG_RE = re.compile(rb"<svg\b[^>]*>", re.S)
 ATTR_RE = re.compile(rb"""\s([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
@@ -118,6 +123,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.server.verbose:
             super().log_message(fmt, *args)
 
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        super().end_headers()
+
     def send_bytes(self, body, ctype, status=HTTPStatus.OK, headers=None):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
@@ -134,12 +144,12 @@ class Handler(BaseHTTPRequestHandler):
     def fail(self, status, msg=""):
         self.send_bytes(msg.encode(), "text/plain; charset=utf-8", status)
 
-    def resolve(self, rel):
-        """Map a client-supplied relative path to a real path inside the root, or None."""
-        root = self.server.root
+    @staticmethod
+    def resolve(root, rel):
+        """Map a client-supplied relative path to a real path inside `root`, or None."""
         try:
             p = (root / rel.lstrip("/")).resolve()
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):  # ValueError: NUL byte in the path
             return None
         return p if p == root or p.is_relative_to(root) else None
 
@@ -148,13 +158,35 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get("Host", "")
         return host in (f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}")
 
+    def route_path(self):
+        """Check host and token; return the decoded path below /<token>, or None after replying.
+
+        Every URL starts with a random secret, so other local users and web pages that
+        guess the port can't list folders, read files, probe for them or write thumbnails.
+        """
+        if not self.host_ok():
+            self.fail(HTTPStatus.FORBIDDEN, "bad host")
+            return None
+        # Split before decoding, so an encoded "/" can't move the token boundary.
+        token, sep, rest = urlsplit(self.path).path[1:].partition("/")
+        if not hmac.compare_digest(token.encode(), self.server.token.encode()):
+            self.fail(HTTPStatus.FORBIDDEN, "open the URL printed by esvigy")
+            return None
+        if not sep:  # /<token> -> /<token>/, so relative URLs resolve
+            self.send_response(HTTPStatus.MOVED_PERMANENTLY)
+            self.send_header("Location", f"/{token}/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
+        return "/" + unquote(rest)
+
     # --- routing -----------------------------------------------------------
 
     def do_GET(self):
-        if not self.host_ok():
-            return self.fail(HTTPStatus.FORBIDDEN, "bad host")
-        url = urlsplit(self.path)
-        path, query = unquote(url.path), parse_qs(url.query, keep_blank_values=True)
+        path = self.route_path()
+        if path is None:
+            return
+        query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
         if path in ("/", "/index.html"):
             return self.serve_static("index.html")
         if path.startswith("/static/"):
@@ -169,28 +201,43 @@ class Handler(BaseHTTPRequestHandler):
 
     do_HEAD = do_GET
 
-    def do_POST(self):
-        if not self.host_ok():
-            return self.fail(HTTPStatus.FORBIDDEN, "bad host")
+    def write_path(self):
+        """route_path() for requests that change state; they also need the X-Esvigy header."""
+        path = self.route_path()
+        if path is None:
+            return None
         # A custom header can't be sent cross-site without a CORS preflight, which we never grant.
         if self.headers.get("X-Esvigy") != "1":
-            return self.fail(HTTPStatus.FORBIDDEN, "missing header")
-        if urlsplit(self.path).path != "/api/open":
+            self.fail(HTTPStatus.FORBIDDEN, "missing header")
+            return None
+        return path
+
+    def do_POST(self):
+        path = self.write_path()
+        if path is None:
+            return
+        if path != "/api/open":
             return self.fail(HTTPStatus.NOT_FOUND)
         self.api_open()
 
     def do_PUT(self):
-        if not self.host_ok():
-            return self.fail(HTTPStatus.FORBIDDEN, "bad host")
-        path = unquote(urlsplit(self.path).path)
+        path = self.write_path()
+        if path is None:
+            return
         if not path.startswith("/thumb/"):
             return self.fail(HTTPStatus.NOT_FOUND)
         name = path[len("/thumb/"):]
-        length = int(self.headers.get("Content-Length") or 0)
-        if not re.fullmatch(r"[0-9a-f]{24}\.webp", name) or not 0 < length <= MAX_THUMB_BYTES:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if not THUMB_NAME_RE.fullmatch(name) or not 0 < length <= MAX_THUMB_BYTES:
+            self.close_connection = True  # the body (if any) is left unread
             return self.fail(HTTPStatus.BAD_REQUEST)
         data = self.rfile.read(length)
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        if len(data) != length or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+            return self.fail(HTTPStatus.BAD_REQUEST, "not a webp image")
+        CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         tmp = CACHE_DIR / f".{name}.{threading.get_ident()}"
         tmp.write_bytes(data)
         tmp.replace(CACHE_DIR / name)
@@ -201,40 +248,51 @@ class Handler(BaseHTTPRequestHandler):
     # --- endpoints ---------------------------------------------------------
 
     def serve_static(self, rel):
-        p = (STATIC_DIR / rel).resolve()
-        if not p.is_relative_to(STATIC_DIR) or not p.is_file():
+        p = self.resolve(STATIC_DIR, rel)
+        if p is None or not p.is_file():
             return self.fail(HTTPStatus.NOT_FOUND)
-        self.send_bytes(p.read_bytes(), STATIC_TYPES.get(p.suffix, "application/octet-stream"),
-                        headers={"Cache-Control": "no-cache"})
+        headers = {"Cache-Control": "no-cache"}
+        if p.suffix == ".html":
+            port = self.server.server_port
+            loopback = f"http://127.0.0.1:{port} http://localhost:{port}"
+            # The UI may not be framed by anyone; the renderer only by the UI on the other loopback name.
+            ancestors = loopback if p.name == "render.html" else "'none'"
+            headers["Content-Security-Policy"] = (
+                f"default-src 'self'; img-src 'self' blob:; frame-src {loopback}; "
+                f"frame-ancestors {ancestors}; base-uri 'none'; form-action 'none'; object-src 'none'")
+        self.send_bytes(p.read_bytes(), STATIC_TYPES.get(p.suffix, "application/octet-stream"), headers=headers)
 
     def api_list(self, rel):
-        d = self.resolve(rel)
+        root = self.server.root  # once: /api/open may swap it while we work
+        d = self.resolve(root, rel)
         if d is None or not d.is_dir():
             return self.fail(HTTPStatus.NOT_FOUND)
         dirs, files = [], []
         try:
             entries = list(os.scandir(d))
-        except OSError as e:
-            return self.fail(HTTPStatus.FORBIDDEN, str(e))
+        except OSError:
+            return self.fail(HTTPStatus.FORBIDDEN, "cannot read folder")
         for e in entries:
             if e.name.startswith("."):
                 continue
             try:
+                # Symlinks leading out of the root would 404 when opened; don't list (or read) them.
+                real = Path(e.path).resolve()
+                if not real.is_relative_to(root):
+                    continue
                 if e.is_dir():
                     dirs.append(e.name)
                 elif e.is_file() and e.name.lower().endswith(SVG_EXTS):
-                    p = Path(e.path)
                     st = e.stat()
-                    w, h, intrinsic = svg_size(read_head(p))
-                    key = thumb_key(p.resolve(), st)
+                    w, h, intrinsic = svg_size(read_head(real))
+                    key = thumb_key(real, st)
                     files.append({"name": e.name, "size": st.st_size, "mtime": st.st_mtime,
                                   "w": round(w, 3), "h": round(h, 3), "intrinsic": intrinsic,
                                   "key": key, "thumb": (CACHE_DIR / f"{key}.webp").exists()})
-            except OSError:
+            except (OSError, RuntimeError):
                 continue
-        rel_root = "" if d == self.server.root else str(d.relative_to(self.server.root))
-        self.send_json({"dir": rel_root, "root": self.server.root.name or str(self.server.root),
-                        "dirs": dirs, "files": files})
+        rel_root = "" if d == root else str(d.relative_to(root))
+        self.send_json({"dir": rel_root, "root": root.name or str(root), "dirs": dirs, "files": files})
 
     def api_open(self):
         """Pick a folder with the desktop's native dialog and make it the new root."""
@@ -249,8 +307,8 @@ class Handler(BaseHTTPRequestHandler):
         with self.server.open_lock:
             try:
                 r = subprocess.run(cmd, capture_output=True, text=True)
-            except OSError as e:
-                return self.fail(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
+            except OSError:
+                return self.fail(HTTPStatus.INTERNAL_SERVER_ERROR, "cannot start the folder dialog")
             chosen = Path(r.stdout.strip()).expanduser() if r.returncode == 0 and r.stdout.strip() else None
             if chosen is None or not chosen.is_dir():
                 return self.send_bytes(b"", "text/plain", HTTPStatus.NO_CONTENT)  # cancelled
@@ -258,7 +316,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"root": self.server.root.name or str(self.server.root)})
 
     def serve_svg(self, rel, fix):
-        p = self.resolve(rel)
+        p = self.resolve(self.server.root, rel)
         if p is None or not p.is_file() or not p.name.lower().endswith(SVG_EXTS):
             return self.fail(HTTPStatus.NOT_FOUND)
         st = p.stat()
@@ -270,9 +328,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         gz = p.suffix.lower() == ".svgz"
-        headers = {"ETag": etag, "Cache-Control": "no-cache",
-                   # SVG can carry scripts; never let it run anything when opened directly.
-                   "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:"}
+        headers = {"ETag": etag, "Cache-Control": "no-cache", "Content-Security-Policy": SVG_CSP}
         if gz:
             headers["Content-Encoding"] = "gzip"
 
@@ -302,7 +358,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def serve_thumb(self, name):
-        if not re.fullmatch(r"[0-9a-f]{24}\.webp", name):
+        if not THUMB_NAME_RE.fullmatch(name):
             return self.fail(HTTPStatus.NOT_FOUND)
         p = CACHE_DIR / name
         if not p.is_file():
@@ -331,7 +387,9 @@ USER_CHROME_CSS = """\
 
 
 def prepare_profile():
-    (PROFILE_DIR / "chrome").mkdir(parents=True, exist_ok=True)
+    # History in the profile holds the secret URLs; keep it private.
+    PROFILE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (PROFILE_DIR / "chrome").mkdir(exist_ok=True)
     (PROFILE_DIR / "user.js").write_text(USER_JS)
     (PROFILE_DIR / "chrome" / "userChrome.css").write_text(USER_CHROME_CSS)
 
@@ -359,6 +417,8 @@ def make_server(root, port=0, verbose=False):
     server.daemon_threads = True
     server.root, server.verbose = Path(root).resolve(), verbose
     server.open_lock = threading.Lock()
+    server.token = secrets.token_urlsafe(24)
+    server.url = f"http://127.0.0.1:{server.server_port}/{server.token}/"
     return server
 
 
@@ -378,7 +438,7 @@ def main():
     root = target if target.is_dir() else target.parent
 
     server = make_server(root, args.port, args.verbose)
-    url = f"http://127.0.0.1:{server.server_port}/"
+    url = server.url
     if target.is_file():
         url += "#file=" + quote(target.name)
 

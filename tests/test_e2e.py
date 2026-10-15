@@ -39,7 +39,7 @@ def app(tmp_path_factory):
     opts.add_argument("--height=800")
     driver = webdriver.Firefox(options=opts)
     try:
-        yield driver, f"http://127.0.0.1:{srv.server_port}/", root, base / "cache"
+        yield driver, srv.url, root, base / "cache"
     finally:
         driver.quit()
         srv.shutdown()
@@ -201,3 +201,45 @@ def test_table_view_sorts_by_column(ui):
 
     ui.card(by_size[0]).click()  # rows open the viewer like cards do
     ui.wait(ui.viewer_open)
+
+
+# ---------------------------------------------------------------- security in a real browser
+
+EVIL_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"
+  onload="document.title='pwned-onload'">
+  <script>document.title = 'pwned-script'; fetch('../api/list').then(() => document.title = 'pwned-fetch');</script>
+  <image href="http://127.0.0.1:9/track.png" width="1" height="1"/>
+</svg>"""
+
+
+def test_svg_scripts_never_run(ui):
+    (ui.root / "evil.svg").write_text(EVIL_SVG)
+    ui.by_id("refresh").click()
+    ui.wait(lambda: "evil.svg" in ui.card_names())
+    ui.card("evil.svg").click()  # in the viewer (<img>)
+    ui.wait(lambda: ui.by_id("v-time").text.endswith("ms"))
+    assert "pwned" not in ui.d.title
+
+    ui.d.get(ui.url + "file/evil.svg")  # opened directly, like the "raw ↗" link
+    ui.wait(lambda: ui.js("return document.readyState") == "complete")
+    assert "pwned" not in ui.d.title
+    (ui.root / "evil.svg").unlink()
+
+
+def test_page_without_token_shows_nothing(ui):
+    base = ui.url.rsplit("/", 2)[0] + "/"  # http://127.0.0.1:PORT/
+    ui.d.get(base)
+    assert "esvigy" not in ui.d.title and not ui.d.find_elements(By.ID, "grid")
+
+
+def test_no_csp_violations_in_the_ui(ui):
+    # The CSP must not break the app itself (renderer frame, blob thumbnails, styles).
+    ui.js("window._violations = []; document.addEventListener('securitypolicyviolation', "
+          "e => window._violations.push(e.violatedDirective + ' ' + e.blockedURI))")
+    for p in ui.cache.glob("*.webp"):  # force real renders through the renderer frame
+        p.unlink()
+    ui.by_id("refresh").click()
+    ui.wait(lambda: ui.js("return [...document.querySelectorAll('.card img')].every(i => i.getAttribute('src'))"))
+    ui.card("a.svg").click()
+    ui.wait(lambda: ui.by_id("v-time").text.endswith("ms"))
+    assert ui.js("return window._violations") == []

@@ -44,10 +44,20 @@ Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
 | / | filter | |
 | o / s / b / r | open folder / toggle sidebar / background / reload | same |
 
-## Notes
+## Security
 
-- Binds to 127.0.0.1 only and only serves files below the given directory.
-- SVGs are shown via `<img>`, so scripts inside them never run.
+- Binds to 127.0.0.1 only and only serves files below the given directory
+  (symlinks leading out of it are neither listed nor served).
+- Every URL starts with a random secret (`http://127.0.0.1:PORT/<token>/`), new on each start.
+  Other users on the machine and web pages that find the port get `403`. Treat the
+  printed URL like a password; with `-b none`, don't paste it anywhere public.
+- Requests that change something (Open…, thumbnail upload) also need an `X-Esvigy` header,
+  which other websites can't send. Uploaded thumbnails must be WebP.
+- SVGs are shown via `<img>`, so scripts inside them never run; opened directly ("raw ↗")
+  they get a CSP sandbox that blocks scripts and external loads. The UI forbids inline
+  scripts and being framed by other sites.
+- Thumbnails (`~/.cache/esvigy/thumbs`) and the Firefox profile are created `0700`. Thumbnails
+  are kept forever; delete the folder to clear them.
 
 ## Own window
 
@@ -65,7 +75,11 @@ window at a time can use that profile.
 - `tests/test_svg.py`: SVG size parsing and header rewriting
 - `tests/test_server.py`: the HTTP server against a temp folder: listing, file serving,
   path-traversal/symlink/Host-header protection, thumbnail cache, the Open dialog (with a fake `zenity`)
+- `tests/test_security.py`: one check per attack from the section above: missing/wrong token,
+  cross-site writes, DNS rebinding, cache poisoning, malformed requests, escaping the root,
+  security headers, file permissions
 - `tests/test_e2e.py`: the UI in headless Firefox via Selenium (grid, viewer, compare, table view).
+  Also checks in a real browser that a malicious SVG can't run scripts and that the CSP doesn't break the UI.
   Skipped if Firefox or selenium is missing; geckodriver is downloaded on first run.
 
 Tests never touch your real thumbnail cache; it can also be redirected with `ESVIGY_CACHE=/some/dir`.
