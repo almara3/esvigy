@@ -25,6 +25,7 @@
     <span id="status"></span>
     <span class="grow"></span>
     <button id="g-cmp" title="Compare the two selected files (c)" hidden>Compare 2</button>
+    <button id="view" title="Grid / table view (t)">☷</button>
     <select id="sort" title="Sort">
       <option value="name">Name</option>
       <option value="size">Size</option>
@@ -32,6 +33,13 @@
     </select>
     <button id="bg" title="Background (b)">◐</button>
     <input id="tile" type="range" min="96" max="420" step="4" value="180" title="Thumbnail size">
+  </div>
+  <div id="thead" hidden>
+    <span></span>
+    <button data-sort="name">Name</button>
+    <span>Dimensions</span>
+    <button data-sort="size">File size</button>
+    <button data-sort="mtime">Modified</button>
   </div>
   <div id="grid"></div>
   <div id="empty" hidden>No SVG files in this folder.</div>

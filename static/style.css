@@ -157,8 +157,49 @@ body.no-side #side { display: none; }
   border-radius: 50%;
   animation: spin .8s linear infinite;
 }
-.card .name { margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Names get two lines; file names rarely contain spaces, so break anywhere. */
+.card .name {
+  margin-top: 5px;
+  line-height: 1.3;
+  min-height: 2.6em;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
 .card .meta { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .meta .date { display: none; }
+.card .meta .size::before { content: " · "; }
+
+/* Table view: one row per file, full names, sortable columns. */
+#main.table #tile { display: none; }
+#main:not(.table) #thead { display: none; }
+#thead, #main.table .card {
+  --cols: 44px minmax(0, 1fr) 90px 80px 140px;
+  display: grid;
+  grid-template-columns: var(--cols);
+  align-items: center;
+  column-gap: 12px;
+}
+#thead {
+  padding: 4px 19px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+#thead[hidden] { display: none; }
+#thead button { border: 0; padding: 2px 0; text-align: left; border-radius: 4px; color: inherit; }
+#thead button.active { color: var(--text); font-weight: 600; }
+#main.table #grid { display: flex; flex-direction: column; gap: 3px; padding: 8px 12px; }
+#main.table .card { flex: none; padding: 3px 6px; border-radius: 6px; }
+#main.table .card .pic { aspect-ratio: 1; height: 44px; width: 44px; }
+#main.table .card .name { margin: 0; min-height: 0; display: block; -webkit-line-clamp: unset; overflow: visible; }
+#main.table .card .meta { display: contents; }
+#main.table .card .meta span { white-space: nowrap; font-size: 12px; }
+#main.table .card .meta .date { display: inline; }
+#main.table .card .meta .size::before { content: none; }
 #empty { padding: 40px; color: var(--muted); text-align: center; }
 
 /* Viewer */

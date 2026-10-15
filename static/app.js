@@ -22,6 +22,8 @@ function fmtSize(n) {
   do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
   return n.toFixed(n < 10 ? 1 : 0) + " " + u[i];
 }
+const dateFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" });
+const fmtDate = (t) => dateFmt.format(t * 1000);
 const fmtDims = (f) => Math.round(f.w) + "×" + Math.round(f.h);
 
 const prefs = {
@@ -173,6 +175,7 @@ async function loadDir(dir) {
   renderGrid();
 }
 
+let sortRev = prefs.get("rev", "0") === "1";
 function sortFiles() {
   const key = $("sort").value;
   const cmp = {
@@ -181,6 +184,14 @@ function sortFiles() {
     mtime: (a, b) => b.mtime - a.mtime,
   }[key];
   state.files.sort(cmp);
+  if (sortRev) state.files.reverse();
+  // Mark the active column; the arrow shows the visible direction.
+  const asc = (key === "name") !== sortRev;
+  document.querySelectorAll("#thead [data-sort]").forEach((b) => {
+    const on = b.dataset.sort === key;
+    b.classList.toggle("active", on);
+    b.textContent = b.textContent.replace(/ [▲▼]$/, "") + (on ? (asc ? " ▲" : " ▼") : "");
+  });
 }
 
 function renderCrumbs(dir, rootName) {
@@ -216,7 +227,10 @@ function renderGrid() {
     img.alt = "";
     img.decoding = "async";
     pic.append(img);
-    card.append(pic, el("div", "name", f.name), el("div", "meta", fmtDims(f) + " · " + fmtSize(f.size)));
+    const meta = el("div", "meta");
+    meta.append(el("span", "dims", fmtDims(f)), el("span", "size", fmtSize(f.size)),
+                el("span", "date", fmtDate(f.mtime)));
+    card.append(pic, el("div", "name", f.name), meta);
     card.title = f.name;
     card.classList.toggle("sel", selected.includes(f));
     card._file = f;
@@ -261,7 +275,7 @@ grid.addEventListener("keydown", (e) => {
   if (!card || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) return;
   e.preventDefault();
   const i = +card.dataset.i;
-  const cols = getComputedStyle(grid).gridTemplateColumns.split(" ").length;
+  const cols = $("main").classList.contains("table") ? 1 : getComputedStyle(grid).gridTemplateColumns.split(" ").length;
   const n = state.view.length;
   const j = { ArrowLeft: i - 1, ArrowRight: i + 1, ArrowUp: i - cols, ArrowDown: i + cols, Home: 0, End: n - 1 }[e.key];
   const target = grid.children[Math.max(0, Math.min(n - 1, j))];
@@ -674,7 +688,32 @@ $("v-link").addEventListener("click", () => setLink(!cmp.link));
 // ---------------------------------------------------------------- controls & keys
 
 $("filter").addEventListener("input", () => renderGrid());
-$("sort").addEventListener("change", () => { prefs.set("sort", $("sort").value); sortFiles(); renderGrid(); });
+$("sort").addEventListener("change", () => {
+  sortRev = false;
+  prefs.set("sort", $("sort").value);
+  prefs.set("rev", "0");
+  sortFiles();
+  renderGrid();
+});
+// Clicking a column header sorts by it; clicking the active one reverses the order.
+$("thead").addEventListener("click", (e) => {
+  const key = e.target.closest("[data-sort]")?.dataset.sort;
+  if (!key) return;
+  if ($("sort").value === key) sortRev = !sortRev;
+  else { $("sort").value = key; sortRev = false; }
+  prefs.set("sort", key);
+  prefs.set("rev", sortRev ? "1" : "0");
+  sortFiles();
+  renderGrid();
+});
+
+function setView(v) {
+  $("main").classList.toggle("table", v === "table");
+  $("thead").hidden = v !== "table";
+  prefs.set("view", v);
+}
+const toggleView = () => setView($("main").classList.contains("table") ? "grid" : "table");
+$("view").addEventListener("click", toggleView);
 $("tile").addEventListener("input", (e) => {
   document.documentElement.style.setProperty("--tile", e.target.value + "px");
   prefs.set("tile", e.target.value);
@@ -744,12 +783,14 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "b") cycleBg();
   else if (e.key === "r") refresh();
   else if (e.key === "o") openFolder();
+  else if (e.key === "t") toggleView();
 });
 
 // ---------------------------------------------------------------- start
 
 (function init() {
   $("sort").value = prefs.get("sort", "name");
+  setView(prefs.get("view", "grid"));
   const tile = prefs.get("tile", "180");
   $("tile").value = tile;
   document.documentElement.style.setProperty("--tile", tile + "px");
