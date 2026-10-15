@@ -19,7 +19,7 @@ Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
 ## Features
 
 - Folder tree in the sidebar, thumbnail grid in the main panel
-- Thumbnails are rendered once by the browser, one at a time, visible ones first,
+- Thumbnails are rendered once by the browser in a hidden frame (its own process, so the UI never freezes), two at a time, visible ones first,
   and cached in `~/.cache/esvigy/thumbs` (keyed on path + mtime + size), so a
   folder you've seen before opens instantly
 - Viewer shows the cached thumbnail immediately, then swaps in the full render

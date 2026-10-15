@@ -302,47 +302,69 @@ const thumbs = {
   pause(p) { this.paused = p; if (!p) this.pump(); },
   pump() {
     updateStatus();
-    while (!this.paused && this.running < 1 && this.pending.size) {
+    while (!this.paused && this.running < 2 && this.pending.size) {
       const f = this.pending.values().next().value;
       this.pending.delete(f);
       this.running++;
       const gen = this.generation, dir = state.dir;
       renderThumb(f, dir, gen).finally(() => {
         this.running--;
-        // Yield a frame so the UI stays responsive between heavy renders.
-        requestAnimationFrame(() => this.pump());
+        this.pump();
       });
     }
+  },
+};
+
+// Drawing a huge SVG blocks whatever thread does it, so it happens in a hidden iframe on
+// the *other* loopback hostname. That is a different origin, which Firefox puts in its own
+// process, so the UI keeps running while thumbnails are drawn.
+const renderer = {
+  frame: null,
+  ready: null,
+  nextId: 1,
+  waiting: new Map(),
+  start() {
+    if (this.ready) return this.ready;
+    const host = location.hostname === "localhost" ? "127.0.0.1" : "localhost";
+    this.origin = location.protocol + "//" + host + ":" + location.port;
+    this.ready = new Promise((resolve) => {
+      this.frame = el("iframe");
+      this.frame.hidden = true;
+      this.frame.src = this.origin + "/static/render.html";
+      this.onReady = resolve;
+      document.body.append(this.frame);
+    });
+    window.addEventListener("message", (e) => {
+      if (e.origin !== this.origin) return;
+      if (e.data?.ready) return this.onReady();
+      this.waiting.get(e.data?.id)?.(e.data);
+    });
+    return this.ready;
+  },
+  async render(msg) {
+    await this.start();
+    const id = this.nextId++;
+    return new Promise((resolve) => {
+      this.waiting.set(id, (r) => { this.waiting.delete(id); resolve(r); });
+      this.frame.contentWindow.postMessage({ type: "render", id, ...msg }, this.origin);
+    });
   },
 };
 
 async function renderThumb(f, dir, gen) {
   const card = cards.get(f);
   card?.classList.add("busy");
-  const src = new Image();
   try {
-    src.src = fileUrl(dir, f, !f.intrinsic);
-    await src.decode();
-    const s = Math.min(THUMB_PX / f.w, THUMB_PX / f.h);
-    const w = Math.max(1, Math.round(f.w * s)), h = Math.max(1, Math.round(f.h * s));
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    canvas.getContext("2d").drawImage(src, 0, 0, w, h);
-    const blob = await new Promise((r) => canvas.toBlob(r, "image/webp", 0.85));
-    if (!blob) throw new Error("encode failed");
-    if (blob.type === "image/webp") {
-      const r = await fetch(thumbUrl(f), { method: "PUT", body: blob });
-      if (r.ok) f.thumb = true;
-    }
+    const r = await renderer.render({ url: fileUrl(dir, f, !f.intrinsic), key: f.key, w: f.w, h: f.h, max: THUMB_PX });
+    if (r.error) throw new Error(r.error);
+    if (r.cached) f.thumb = true;
     const img = cards.get(f)?.querySelector("img");
-    if (img && gen === thumbs.generation) img.src = URL.createObjectURL(blob);
+    if (img && gen === thumbs.generation) img.src = r.cached ? thumbUrl(f) : URL.createObjectURL(r.blob);
   } catch (e) {
     const pic = cards.get(f)?.querySelector(".pic");
     if (pic && !pic.querySelector(".note")) pic.append(el("span", "note", "⚠ cannot render"));
     console.warn("thumbnail failed", f.name, e);
   } finally {
-    src.src = "";
     cards.get(f)?.classList.remove("busy");
   }
 }
