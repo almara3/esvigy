@@ -538,6 +538,21 @@ function refresh() {
 }
 $("refresh").addEventListener("click", refresh);
 
+async function openFolder() {
+  const btn = $("open");
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/open", { method: "POST", headers: { "X-Esvigy": "1" } });
+    if (r.status === 204) return; // dialog cancelled
+    if (!r.ok) { alert(await r.text()); return; }
+    history.replaceState(null, "", "#");
+    refresh();
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("open").addEventListener("click", openFolder);
+
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.altKey || e.metaKey) return;
   const typing = e.target.matches("input[type=search], input[type=text]");
@@ -565,6 +580,7 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "s") toggleSide();
   else if (e.key === "b") cycleBg();
   else if (e.key === "r") refresh();
+  else if (e.key === "o") openFolder();
 });
 
 // ---------------------------------------------------------------- start

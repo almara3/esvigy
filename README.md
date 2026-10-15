@@ -24,6 +24,7 @@ Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
 - Viewer shows the cached thumbnail immediately, then swaps in the full render
 - Pan (drag), zoom at cursor (wheel), double-click toggles fit / 100 %
 - Natural sort, filter, sort by size/date, `.svgz` support
+- **Open…** (or `o`) picks another folder with the native dialog (needs zenity or kdialog)
 - Back button / Esc returns to the grid; URL hash keeps folder and file
 
 ## Keys
@@ -35,7 +36,7 @@ Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
 | Esc / Backspace | | back to grid |
 | f / 0, 1, + / - | | fit, 100 %, zoom |
 | / | filter | |
-| s / b / r | toggle sidebar / background / reload | same |
+| o / s / b / r | open folder / toggle sidebar / background / reload | same |
 
 ## Notes
 

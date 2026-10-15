@@ -168,6 +168,16 @@ class Handler(BaseHTTPRequestHandler):
 
     do_HEAD = do_GET
 
+    def do_POST(self):
+        if not self.host_ok():
+            return self.fail(HTTPStatus.FORBIDDEN, "bad host")
+        # A custom header can't be sent cross-site without a CORS preflight, which we never grant.
+        if self.headers.get("X-Esvigy") != "1":
+            return self.fail(HTTPStatus.FORBIDDEN, "missing header")
+        if urlsplit(self.path).path != "/api/open":
+            return self.fail(HTTPStatus.NOT_FOUND)
+        self.api_open()
+
     def do_PUT(self):
         if not self.host_ok():
             return self.fail(HTTPStatus.FORBIDDEN, "bad host")
@@ -224,6 +234,27 @@ class Handler(BaseHTTPRequestHandler):
         rel_root = "" if d == self.server.root else str(d.relative_to(self.server.root))
         self.send_json({"dir": rel_root, "root": self.server.root.name or str(self.server.root),
                         "dirs": dirs, "files": files})
+
+    def api_open(self):
+        """Pick a folder with the desktop's native dialog and make it the new root."""
+        cmd = None
+        if shutil.which("zenity"):
+            cmd = ["zenity", "--file-selection", "--directory", "--title=Open folder",
+                   f"--filename={self.server.root}/"]
+        elif shutil.which("kdialog"):
+            cmd = ["kdialog", "--getexistingdirectory", str(self.server.root)]
+        if cmd is None:
+            return self.fail(HTTPStatus.NOT_IMPLEMENTED, "install zenity or kdialog to use Open")
+        with self.server.open_lock:
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True)
+            except OSError as e:
+                return self.fail(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
+            chosen = Path(r.stdout.strip()).expanduser() if r.returncode == 0 and r.stdout.strip() else None
+            if chosen is None or not chosen.is_dir():
+                return self.send_bytes(b"", "text/plain", HTTPStatus.NO_CONTENT)  # cancelled
+            self.server.root = chosen.resolve()
+        self.send_json({"root": self.server.root.name or str(self.server.root)})
 
     def serve_svg(self, rel, fix):
         p = self.resolve(rel)
@@ -307,6 +338,7 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.daemon_threads = True
     server.root, server.verbose = root, args.verbose
+    server.open_lock = threading.Lock()
     url = f"http://127.0.0.1:{server.server_port}/"
     if target.is_file():
         url += "#file=" + quote(target.name)
