@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>esvigy</title>
+<link rel="icon" href="/static/icon.svg">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-bg="white">
+<aside id="side">
+  <div class="side-head">
+    <span class="logo">esvigy</span>
+    <button id="refresh" title="Reload folder (r)">⟳</button>
+  </div>
+  <input id="filter" type="search" placeholder="Filter files…  ( / )" autocomplete="off">
+  <nav id="tree"></nav>
+</aside>
+
+<main id="main">
+  <div class="bar">
+    <button id="toggle-side" title="Toggle sidebar (s)">☰</button>
+    <div id="crumbs"></div>
+    <span id="status"></span>
+    <span class="grow"></span>
+    <select id="sort" title="Sort">
+      <option value="name">Name</option>
+      <option value="size">Size</option>
+      <option value="mtime">Modified</option>
+    </select>
+    <button id="bg" title="Background (b)">◐</button>
+    <input id="tile" type="range" min="96" max="420" step="4" value="180" title="Thumbnail size">
+  </div>
+  <div id="grid"></div>
+  <div id="empty" hidden>No SVG files in this folder.</div>
+
+  <section id="viewer" hidden>
+    <div class="bar">
+      <button id="v-close" title="Back to grid (Esc)">←</button>
+      <span id="v-name"></span>
+      <span id="v-info"></span>
+      <span class="grow"></span>
+      <span id="v-time"></span>
+      <button id="v-prev" title="Previous (←)">‹</button>
+      <span id="v-pos"></span>
+      <button id="v-next" title="Next (→)">›</button>
+      <button id="v-fit" title="Fit (f / 0)">Fit</button>
+      <button id="v-100" title="Actual size (1)">1:1</button>
+      <span id="v-zoom"></span>
+      <a id="v-raw" target="_blank" title="Open the raw file in a new tab">raw ↗</a>
+    </div>
+    <div id="stage">
+      <div id="layer"><img id="v-thumb" alt=""><img id="v-img" alt=""></div>
+      <div id="v-load"><span class="spinner"></span> rendering…</div>
+    </div>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
