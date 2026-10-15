@@ -27,13 +27,24 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 CACHE_DIR = Path(os.environ.get("ESVIGY_CACHE")
                  or Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "esvigy" / "thumbs")
 SVG_EXTS = (".svg", ".svgz")
+PDF_EXTS = (".pdf",)
+DOC_EXTS = SVG_EXTS + PDF_EXTS
+# PDFs can't be measured without a PDF parser. Until the browser has rendered one (and
+# stored its size in the cache), assume an A4 page.
+A4_PX = (793.701, 1122.52)
 HEAD_BYTES = 64 * 1024
 MAX_THUMB_BYTES = 4 * 1024 * 1024
+MAX_META_BYTES = 1024
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-                ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml"}
+                ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
+                ".mjs": "text/javascript; charset=utf-8", ".wasm": "application/wasm"}
 THUMB_NAME_RE = re.compile(r"[0-9a-f]{24}\.webp")
+META_NAME_RE = re.compile(r"[0-9a-f]{24}\.json")
 # SVG can carry scripts; never let it run anything when opened directly.
 SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox"
+# PDFs are drawn by our bundled pdf.js (fetched as data, so this doesn't apply there). Opened
+# directly via "raw", Firefox's own viewer shows them; nothing else may load or run.
+PDF_CSP = "default-src 'none'"
 
 SVG_TAG_RE = re.compile(rb"<svg\b[^>]*>", re.S)
 ATTR_RE = re.compile(rb"""\s([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
@@ -106,6 +117,25 @@ def with_intrinsic_size(head, w, h):
     tag = re.sub(rb"""\s(width|height)\s*=\s*("[^"]*"|'[^']*')""", b"", m.group(0))
     tag = tag[:4] + b' width="%.3f" height="%.3f"' % (w, h) + tag[4:]
     return head[:m.start()] + tag + head[m.end():]
+
+
+def parse_meta(data):
+    """Validate a document's metadata as sent by the browser; return a clean dict or None."""
+    try:
+        m = json.loads(data)
+        w, h, pages = float(m["w"]), float(m["h"]), int(m["pages"])
+    except (ValueError, TypeError, KeyError):
+        return None
+    if not (0 < w < 1e6 and 0 < h < 1e6 and 0 < pages < 1e6) or m["pages"] != pages:
+        return None
+    return {"w": round(w, 3), "h": round(h, 3), "pages": pages}
+
+
+def read_meta(key):
+    try:
+        return parse_meta((CACHE_DIR / f"{key}.json").read_bytes()[:MAX_META_BYTES])
+    except OSError:
+        return None
 
 
 def thumb_key(path, st):
@@ -194,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/list":
             return self.api_list(query.get("dir", [""])[0])
         if path.startswith("/file/"):
-            return self.serve_svg(path[len("/file/"):], "fix" in query)
+            return self.serve_file(path[len("/file/"):], "fix" in query)
         if path.startswith("/thumb/"):
             return self.serve_thumb(path[len("/thumb/"):])
         self.fail(HTTPStatus.NOT_FOUND)
@@ -231,11 +261,20 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = -1
-        if not THUMB_NAME_RE.fullmatch(name) or not 0 < length <= MAX_THUMB_BYTES:
+        is_meta = bool(META_NAME_RE.fullmatch(name))
+        limit = MAX_META_BYTES if is_meta else MAX_THUMB_BYTES
+        if not (is_meta or THUMB_NAME_RE.fullmatch(name)) or not 0 < length <= limit:
             self.close_connection = True  # the body (if any) is left unread
             return self.fail(HTTPStatus.BAD_REQUEST)
         data = self.rfile.read(length)
-        if len(data) != length or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        if len(data) != length:
+            return self.fail(HTTPStatus.BAD_REQUEST)
+        if is_meta:
+            meta = parse_meta(data)
+            if meta is None:
+                return self.fail(HTTPStatus.BAD_REQUEST, "bad metadata")
+            data = json.dumps(meta).encode()  # store only what we validated
+        elif data[:4] != b"RIFF" or data[8:12] != b"WEBP":
             return self.fail(HTTPStatus.BAD_REQUEST, "not a webp image")
         CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         tmp = CACHE_DIR / f".{name}.{threading.get_ident()}"
@@ -282,13 +321,20 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 if e.is_dir():
                     dirs.append(e.name)
-                elif e.is_file() and e.name.lower().endswith(SVG_EXTS):
+                elif e.is_file() and e.name.lower().endswith(DOC_EXTS):
                     st = e.stat()
-                    w, h, intrinsic = svg_size(read_head(real))
                     key = thumb_key(real, st)
-                    files.append({"name": e.name, "size": st.st_size, "mtime": st.st_mtime,
-                                  "w": round(w, 3), "h": round(h, 3), "intrinsic": intrinsic,
-                                  "key": key, "thumb": (CACHE_DIR / f"{key}.webp").exists()})
+                    f = {"name": e.name, "size": st.st_size, "mtime": st.st_mtime,
+                         "key": key, "thumb": (CACHE_DIR / f"{key}.webp").exists()}
+                    if e.name.lower().endswith(PDF_EXTS):
+                        meta = read_meta(key)
+                        w, h = (meta["w"], meta["h"]) if meta else A4_PX
+                        f.update(kind="pdf", pages=meta and meta["pages"], intrinsic=True)
+                    else:
+                        w, h, intrinsic = svg_size(read_head(real))
+                        f.update(kind="svg", intrinsic=intrinsic)
+                    f.update(w=round(w, 3), h=round(h, 3))
+                    files.append(f)
             except (OSError, RuntimeError):
                 continue
         rel_root = "" if d == root else str(d.relative_to(root))
@@ -315,10 +361,12 @@ class Handler(BaseHTTPRequestHandler):
             self.server.root = chosen.resolve()
         self.send_json({"root": self.server.root.name or str(self.server.root)})
 
-    def serve_svg(self, rel, fix):
+    def serve_file(self, rel, fix):
         p = self.resolve(self.server.root, rel)
-        if p is None or not p.is_file() or not p.name.lower().endswith(SVG_EXTS):
+        if p is None or not p.is_file() or not p.name.lower().endswith(DOC_EXTS):
             return self.fail(HTTPStatus.NOT_FOUND)
+        pdf = p.name.lower().endswith(PDF_EXTS)
+        fix = fix and not pdf
         st = p.stat()
         etag = f'"{thumb_key(p, st)}{"f" if fix else ""}"'
         if self.headers.get("If-None-Match") == etag:
@@ -328,7 +376,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         gz = p.suffix.lower() == ".svgz"
-        headers = {"ETag": etag, "Cache-Control": "no-cache", "Content-Security-Policy": SVG_CSP}
+        headers = {"ETag": etag, "Cache-Control": "no-cache", "Content-Security-Policy": PDF_CSP if pdf else SVG_CSP}
         if gz:
             headers["Content-Encoding"] = "gzip"
 
@@ -342,7 +390,7 @@ class Handler(BaseHTTPRequestHandler):
 
         length = len(head) + st.st_size - skip
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "image/svg+xml")
+        self.send_header("Content-Type", "application/pdf" if pdf else "image/svg+xml")
         self.send_header("Content-Length", str(length))
         for k, v in headers.items():
             self.send_header(k, v)
@@ -358,7 +406,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def serve_thumb(self, name):
-        if not THUMB_NAME_RE.fullmatch(name):
+        if not THUMB_NAME_RE.fullmatch(name):  # metadata is only delivered through the listing
             return self.fail(HTTPStatus.NOT_FOUND)
         p = CACHE_DIR / name
         if not p.is_file():

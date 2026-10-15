@@ -26,7 +26,19 @@ function fmtSize(n) {
 }
 const dateFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" });
 const fmtDate = (t) => dateFmt.format(t * 1000);
-const fmtDims = (f) => Math.round(f.w) + "×" + Math.round(f.h);
+const fmtDims = (f) => {
+  if (f.kind === "pdf" && !f.pages) return "PDF";  // size unknown until first rendered
+  const d = Math.round(f.w) + "×" + Math.round(f.h);
+  return f.kind === "pdf" ? d + " · " + f.pages + (f.pages === 1 ? " page" : " pages") : d;
+};
+
+// The browser measured a PDF (page size, page count): remember it and refresh the card.
+function updateMeta(f, meta) {
+  if (!meta) return;
+  Object.assign(f, meta);
+  const dims = cards.get(f)?.querySelector(".dims");
+  if (dims) dims.textContent = fmtDims(f);
+}
 
 const prefs = {
   get(k, d) { try { return localStorage.getItem("esvigy." + k) ?? d; } catch { return d; } },
@@ -235,6 +247,7 @@ function renderGrid() {
     card.append(pic, el("div", "name", f.name), meta);
     card.title = f.name;
     card.classList.toggle("sel", selected.includes(f));
+    card.classList.toggle("pdf", f.kind === "pdf");
     card._file = f;
     cards.set(f, card);
     frag.append(card);
@@ -371,7 +384,9 @@ async function renderThumb(f, dir, gen) {
   const card = cards.get(f);
   card?.classList.add("busy");
   try {
-    const r = await renderer.render({ url: fileUrl(dir, f, !f.intrinsic), key: f.key, w: f.w, h: f.h, max: THUMB_PX });
+    const r = await renderer.render({ url: fileUrl(dir, f, !f.intrinsic), kind: f.kind, key: f.key,
+                                      w: f.w, h: f.h, max: THUMB_PX });
+    updateMeta(f, r.meta);
     if (r.error) throw new Error(r.error);
     if (r.cached) f.thumb = true;
     const img = cards.get(f)?.querySelector("img");
@@ -418,7 +433,8 @@ class Pane {
     this.thumb.alt = this.img.alt = "";
     this.load = el("div", "load");
     this.cap = el("div", "cap");
-    this.layer.append(this.thumb, this.img);
+    this.canvas = el("canvas", "img");  // PDFs are drawn here instead of in `img`
+    this.layer.append(this.thumb, this.img, this.canvas);
     this.stage.append(this.layer, this.load);
     this.el.append(this.stage, this.cap);
     Object.assign(this, { f: null, s: 1, x: 0, y: 0, committed: 1, fitted: true, token: 0, timer: 0, drag: null });
@@ -426,6 +442,7 @@ class Pane {
   }
 
   setFile(f) {
+    this.closePdf();
     this.f = f;
     const token = ++this.token;
     const t0 = performance.now();
@@ -443,6 +460,26 @@ class Pane {
     this.load.replaceChildren(el("span", "spinner"), " rendering…");
     this.load.hidden = false;
 
+    this.canvas.classList.remove("ready");
+    const pdf = f.kind === "pdf";
+    this.img.hidden = pdf;
+    this.canvas.hidden = !pdf;
+
+    const done = () => {
+      this.thumb.hidden = true;
+      this.load.hidden = true;
+      const ms = Math.round(performance.now() - t0) + " ms";
+      this.timeEl.textContent = ms;
+      if (this === panes[0]) $("v-time").textContent = ms;
+      if (!active()[1]) prefetch(state.current + 1);
+    };
+    const failed = (e) => {
+      if (token !== this.token) return;
+      this.load.textContent = "⚠ cannot render this file";
+      console.warn("render failed", f.name, e);
+    };
+    if (pdf) return this.openPdf(token, done).catch(failed);
+
     this.img.src = fileUrl(state.dir, f);
     this.img.decode().then(() => {
       if (token !== this.token) return;
@@ -450,21 +487,63 @@ class Pane {
       requestAnimationFrame(() => requestAnimationFrame(() => {
         if (token !== this.token) return;
         this.img.classList.add("ready");
-        this.thumb.hidden = true;
-        this.load.hidden = true;
-        const ms = Math.round(performance.now() - t0) + " ms";
-        this.timeEl.textContent = ms;
-        if (this === panes[0]) $("v-time").textContent = ms;
-        if (!active()[1]) prefetch(state.current + 1);
+        done();
       }));
-    }).catch(() => {
-      if (token !== this.token) return;
-      this.load.textContent = "⚠ cannot render this file";
+    }).catch(failed);
+  }
+
+  // ---- PDF: pdf.js draws page 1 into a canvas sized for the committed zoom.
+
+  async openPdf(token, done) {
+    const f = this.f;
+    const doc = await pdfDocs.open(fileUrl(state.dir, f));
+    if (token !== this.token) return doc.loadingTask.destroy();
+    this.doc = doc;
+    this.page = await doc.getPage(1);
+    if (token !== this.token) return;
+    // The listing may only have guessed the size; correct it and re-fit.
+    const meta = { ...pdfDocs.size(this.page), pages: doc.numPages };
+    if (Math.abs(meta.w - f.w) > 0.5 || Math.abs(meta.h - f.h) > 0.5 || meta.pages !== f.pages) {
+      updateMeta(f, meta);
+      this.cap.querySelector("span").textContent = fmtDims(f) + " · " + fmtSize(f.size);
+      if (this === panes[0] && state.cmp < 0) $("v-info").textContent = fmtDims(f) + " · " + fmtSize(f.size);
+    }
+    if (this.fitted) fitGroup(this);  // calls commit(), which draws
+    else this.commit();
+    await this.drawing;
+    if (token === this.token) done();
+  }
+
+  // Redraw at the committed zoom. The old bitmap stays (stretched) until the new one is ready.
+  drawPdf() {
+    if (!this.page) return;
+    this.task?.cancel();
+    const { canvas, task } = pdfDocs.draw(this.page, this.committed * devicePixelRatio);
+    this.task = task;
+    const token = this.token;
+    this.drawing = task.promise.then(() => {
+      if (token !== this.token || this.task !== task) return;
+      canvas.className = "img ready";
+      this.canvas.replaceWith(canvas);
+      this.canvas = canvas;
+    }, (e) => {
+      if (e?.name !== "RenderingCancelledException") throw e;
     });
+    return this.drawing;
+  }
+
+  closePdf() {
+    this.task?.cancel();
+    this.doc?.loadingTask.destroy();
+    this.task = this.doc = this.page = this.drawing = null;
+    const blank = el("canvas", "img");
+    this.canvas.replaceWith(blank);  // drop the old bitmap's memory
+    this.canvas = blank;
   }
 
   clear() {
     this.token++;
+    this.closePdf();
     this.f = null;
     this.img.removeAttribute("src");
     this.thumb.removeAttribute("src");
@@ -482,6 +561,7 @@ class Pane {
     this.layer.style.height = this.f.h * this.s + "px";
     this.layer.classList.remove("moving");
     this.apply();
+    if (this.page) this.drawPdf();
   }
 
   interact() {
@@ -616,7 +696,7 @@ function openViewer(i, j = -1) {
 
 function prefetch(i) {
   const f = state.view[i];
-  if (!f || f.size > 64 * 1024 * 1024) return;
+  if (!f || f.kind === "pdf" || f.size > 64 * 1024 * 1024) return;
   const img = new Image();
   img.src = fileUrl(state.dir, f);
 }

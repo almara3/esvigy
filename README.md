@@ -29,6 +29,9 @@ Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
   Shift+arrows step A, `c` goes back to a single file. The URL (`#file=a.svg&vs=b.svg`) is shareable.
 - Table view (`t`): full file names, dimensions, size and date; click a column header to sort, click again to reverse
 - File names get two lines in the grid (full name on hover)
+- **PDF** (page 1 for now): drawn by the bundled pdf.js (`static/vendor/pdfjs`, Mozilla, Apache-2.0),
+  with thumbnails, zoom and compare like SVGs. Page size and page count show up once a PDF has
+  been rendered (they are cached next to the thumbnail). PDF scripts are never run.
 - Natural sort, filter, sort by size/date, `.svgz` support
 - **Open…** (or `o`) picks another folder with the native dialog (needs zenity or kdialog)
 - Back button / Esc returns to the grid; URL hash keeps folder and file

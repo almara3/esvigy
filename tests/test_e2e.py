@@ -10,7 +10,7 @@ import threading
 import pytest
 
 import esvigy
-from conftest import make_tree
+from conftest import make_pdf, make_tree
 
 webdriver = pytest.importorskip("selenium.webdriver")
 from selenium.webdriver.common.action_chains import ActionChains  # noqa: E402
@@ -29,6 +29,11 @@ def app(tmp_path_factory):
     """One server and one browser for the whole module (starting Firefox is slow)."""
     base = tmp_path_factory.mktemp("e2e")
     root = make_tree(base / "root")
+    (root / "docs").mkdir()
+    make_pdf(root / "docs" / "a4.pdf", [(595, 842, (0, .5, .5))])
+    make_pdf(root / "docs" / "two.pdf", [(842, 595, (.8, .1, .1)), (595, 842, (0, 0, 1))])
+    # too much for one drawing slice: guards against thumbnails that never finish
+    make_pdf(root / "docs" / "heavy.pdf", [(595, 842, (1, 1, 1))], shapes=150_000)
     old_cache, esvigy.CACHE_DIR = esvigy.CACHE_DIR, base / "cache"
     srv = esvigy.make_server(root)
     threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
@@ -243,3 +248,52 @@ def test_no_csp_violations_in_the_ui(ui):
     ui.card("a.svg").click()
     ui.wait(lambda: ui.by_id("v-time").text.endswith("ms"))
     assert ui.js("return window._violations") == []
+
+
+# ---------------------------------------------------------------- PDF
+
+def pane_pixel(ui, fx, fy):
+    """RGB of the visible PDF canvas in pane 0 at fractions (fx, fy) of its size."""
+    return ui.js("""
+        const c = document.querySelector('.pane:not([hidden]) canvas.ready');
+        if (!c) return null;
+        const d = c.getContext('2d').getImageData(Math.floor(c.width * arguments[0]),
+                                                  Math.floor(c.height * arguments[1]), 1, 1).data;
+        return [d[0], d[1], d[2]];
+    """, fx, fy)
+
+
+def test_pdf_thumbnails_and_page_info(ui):
+    ui.d.get(ui.url + "#dir=docs")
+    ui.wait(lambda: ui.card_names() == ["a4.pdf", "heavy.pdf", "two.pdf"])
+    ui.wait(lambda: ui.js("return [...document.querySelectorAll('.card img')].every(i => i.getAttribute('src'))"),
+            timeout=60)
+    # the browser measured the PDFs: real page size and page count replace the placeholder
+    dims = lambda: ui.js("return [...document.querySelectorAll('.card .dims')].map(e => e.textContent)")
+    ui.wait(lambda: dims() == ["793×1123 · 1 page", "793×1123 · 1 page", "1123×793 · 2 pages"])
+    assert not ui.d.find_elements(By.CSS_SELECTOR, ".card .note")  # no "cannot render"
+    assert len(list(ui.cache.glob("*.json"))) >= 3
+
+
+def test_pdf_viewer_draws_the_page(ui):
+    ui.d.get(ui.url + "#dir=docs&file=a4.pdf")
+    ui.wait(lambda: ui.by_id("v-time").text.endswith("ms"))
+    assert ui.by_id("v-info").text.startswith("793×1123 · 1 page")
+    assert pane_pixel(ui, 0.5, 0.5) == pytest.approx([0, 128, 128], abs=2)  # page colour
+    assert pane_pixel(ui, 0.05, 0.03) == [0, 0, 0]  # black mark: top-left, not upside down
+
+
+def test_pdf_redraws_sharp_after_zoom(ui):
+    ui.d.get(ui.url + "#dir=docs&file=two.pdf")
+    ui.wait(lambda: ui.by_id("v-time").text.endswith("ms"))
+    width = lambda: ui.js("return document.querySelector('.pane:not([hidden]) canvas.ready').width")
+    before = width()
+    ui.wheel(0, -100, times=4)
+    ui.wait(lambda: width() > before * 1.5)  # a new, bigger bitmap after the zoom settles
+    assert pane_pixel(ui, 0.5, 0.5) == pytest.approx([204, 26, 26], abs=2)
+
+
+def test_compare_pdf_with_svg(ui):
+    ui.d.get(ui.url + "#dir=docs&file=a4.pdf&vs=two.pdf")
+    ui.wait(lambda: ui.visible_panes() == 2)
+    ui.wait(lambda: ui.js("return document.querySelectorAll('.pane:not([hidden]) canvas.ready').length") == 2)

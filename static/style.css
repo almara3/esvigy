@@ -170,6 +170,18 @@ body.no-side #side { display: none; }
 }
 .card .meta { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card .meta .date { display: none; }
+.card.pdf .pic::before {
+  content: "PDF";
+  position: absolute;
+  right: 4px; top: 4px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: #c62828;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  z-index: 1;
+}
 .card .meta .size::before { content: " · "; }
 
 /* Table view: one row per file, full names, sortable columns. */
@@ -236,7 +248,8 @@ body.no-side #side { display: none; }
   box-shadow: 0 1px 8px rgba(0, 0, 0, .25);
 }
 .layer.moving { will-change: transform; }
-.layer img { position: absolute; inset: 0; width: 100%; height: 100%; -webkit-user-drag: none; }
+.layer img, .layer canvas { position: absolute; inset: 0; width: 100%; height: 100%; -webkit-user-drag: none; }
+.layer [hidden] { display: none; }
 .layer .img { opacity: 0; }
 .layer .img.ready { opacity: 1; }
 .load {
