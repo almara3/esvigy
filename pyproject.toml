@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+markers = ["e2e: browser tests; need Firefox and selenium, skipped otherwise"]

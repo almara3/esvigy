@@ -55,3 +55,17 @@ By default esvigy opens Firefox in a dedicated profile (`~/.local/share/esvigy/f
 with the tab bar, address bar and bookmarks hidden, window class `esvigy`, and quits
 when you close the window. Your normal Firefox profile is untouched. Only one esvigy
 window at a time can use that profile.
+
+## Tests
+
+    python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+    .venv/bin/pytest                 # everything (~10 s)
+    .venv/bin/pytest -m "not e2e"    # no browser (~1 s)
+
+- `tests/test_svg.py`: SVG size parsing and header rewriting
+- `tests/test_server.py`: the HTTP server against a temp folder: listing, file serving,
+  path-traversal/symlink/Host-header protection, thumbnail cache, the Open dialog (with a fake `zenity`)
+- `tests/test_e2e.py`: the UI in headless Firefox via Selenium (grid, viewer, compare, table view).
+  Skipped if Firefox or selenium is missing; geckodriver is downloaded on first run.
+
+Tests never touch your real thumbnail cache; it can also be redirected with `ESVIGY_CACHE=/some/dir`.

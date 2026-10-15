@@ -22,7 +22,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "esvigy" / "thumbs"
+CACHE_DIR = Path(os.environ.get("ESVIGY_CACHE")
+                 or Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "esvigy" / "thumbs")
 SVG_EXTS = (".svg", ".svgz")
 HEAD_BYTES = 64 * 1024
 MAX_THUMB_BYTES = 4 * 1024 * 1024
@@ -353,6 +354,14 @@ def open_browser(url, browser):
     return None
 
 
+def make_server(root, port=0, verbose=False):
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server.daemon_threads = True
+    server.root, server.verbose = Path(root).resolve(), verbose
+    server.open_lock = threading.Lock()
+    return server
+
+
 def main():
     ap = argparse.ArgumentParser(description="Fast SVG viewer (renders with Firefox).")
     ap.add_argument("path", nargs="?", default=".", help="directory (or SVG file) to browse")
@@ -368,10 +377,7 @@ def main():
         sys.exit(f"esvigy: {target}: no such file or directory")
     root = target if target.is_dir() else target.parent
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    server.daemon_threads = True
-    server.root, server.verbose = root, args.verbose
-    server.open_lock = threading.Lock()
+    server = make_server(root, args.port, args.verbose)
     url = f"http://127.0.0.1:{server.server_port}/"
     if target.is_file():
         url += "#file=" + quote(target.name)
