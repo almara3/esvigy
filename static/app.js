@@ -49,6 +49,7 @@ const state = {
   files: [],        // all SVGs in dir (sorted)
   view: [],         // files after filter
   current: -1,      // index into view while the viewer is open
+  cmp: -1,          // index of the comparison file (compare mode), else -1
   openedByPush: false,
 };
 
@@ -57,12 +58,13 @@ const state = {
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  return { dir: p.get("dir") || "", file: p.get("file") };
+  return { dir: p.get("dir") || "", file: p.get("file"), vs: p.get("vs") };
 }
-function writeHash(dir, file, push) {
+function writeHash(dir, file, push, vs) {
   const p = new URLSearchParams();
   if (dir) p.set("dir", dir);
   if (file) p.set("file", file);
+  if (file && vs) p.set("vs", vs);
   const h = "#" + p.toString().replace(/\+/g, "%20");
   if (push) location.hash = h;
   else { history.replaceState(null, "", h); route(); }
@@ -71,14 +73,15 @@ function writeHash(dir, file, push) {
 let routeToken = 0;
 async function route() {
   const token = ++routeToken;
-  const { dir, file } = readHash();
+  const { dir, file, vs } = readHash();
   if (dir !== state.dir) {
     closeViewer();
     await loadDir(dir);
     if (token !== routeToken) return;
   }
   const i = file ? state.view.findIndex((f) => f.name === file) : -1;
-  if (i >= 0) openViewer(i);
+  const j = vs ? state.view.findIndex((f) => f.name === vs) : -1;
+  if (i >= 0) openViewer(i, j);
   else closeViewer();
 }
 window.addEventListener("hashchange", route);
@@ -147,6 +150,7 @@ const cards = new Map(); // file object -> card element
 
 async function loadDir(dir) {
   state.dir = dir;
+  selected.length = 0;
   thumbs.clear();
   let data;
   try {
@@ -201,6 +205,8 @@ function renderGrid() {
   observer.disconnect();
   thumbs.clear();
   cards.clear();
+  selected.splice(0, selected.length, ...selected.filter((f) => state.view.includes(f)));
+  $("g-cmp").hidden = selected.length !== 2;
   const frag = document.createDocumentFragment();
   state.view.forEach((f, i) => {
     const card = el("button", "card");
@@ -212,6 +218,7 @@ function renderGrid() {
     pic.append(img);
     card.append(pic, el("div", "name", f.name), el("div", "meta", fmtDims(f) + " · " + fmtSize(f.size)));
     card.title = f.name;
+    card.classList.toggle("sel", selected.includes(f));
     card._file = f;
     cards.set(f, card);
     frag.append(card);
@@ -223,9 +230,27 @@ function renderGrid() {
   updateStatus();
 }
 
+// Ctrl/Cmd-click selects up to two files to compare; a plain click opens one.
+const selected = [];
+function toggleSelect(f) {
+  const k = selected.indexOf(f);
+  if (k >= 0) selected.splice(k, 1);
+  else { selected.push(f); if (selected.length > 2) selected.shift(); }
+  for (const [file, card] of cards) card.classList.toggle("sel", selected.includes(file));
+  $("g-cmp").hidden = selected.length !== 2;
+}
+function compareSelected() {
+  if (selected.length !== 2) return;
+  const [a, b] = selected.map((f) => f.name);
+  state.openedByPush = true;
+  writeHash(state.dir, a, true, b);
+}
+$("g-cmp").addEventListener("click", compareSelected);
+
 grid.addEventListener("click", (e) => {
   const card = e.target.closest(".card");
   if (!card) return;
+  if (e.ctrlKey || e.metaKey) return toggleSelect(card._file);
   state.openedByPush = true;
   writeHash(state.dir, card._file.name, true);
 });
@@ -332,59 +357,223 @@ function updateStatus() {
 }
 
 // ---------------------------------------------------------------- viewer
-// The layer is sized in CSS px to `committed` zoom, so Firefox rasterises the
-// SVG at the right resolution. While wheel-zooming we only change a CSS scale
+// Each pane has a layer sized in CSS px to its `committed` zoom, so Firefox rasterises
+// the SVG at the right resolution. While wheel-zooming we only change a CSS scale
 // on top of that (cheap, slightly blurry) and commit the real size once the
 // user pauses, which triggers one crisp re-render.
+// Compare mode shows two panes; with `link` on, pan and zoom are applied to both.
 
-const viewer = $("viewer"), stage = $("stage"), layer = $("layer");
-const vImg = $("v-img"), vThumb = $("v-thumb"), vLoad = $("v-load");
-const view = { s: 1, x: 0, y: 0, committed: 1, f: null, fitted: true };
+const viewer = $("viewer"), panesEl = $("panes");
 const MIN_ZOOM = 0.01, MAX_ZOOM = 64;
-let commitTimer = 0, loadToken = 0;
+const panes = [];
+const cmp = { layout: prefs.get("layout", "side"), link: prefs.get("link", "1") === "1" };
+const active = () => panes.filter((p) => !p.el.hidden);
+const targets = (p) => (!p || cmp.link ? active() : [p]);
 
-function openViewer(i) {
-  const f = state.view[i];
-  state.current = i;
-  viewer.hidden = false;
-  thumbs.pause(true);
-  $("v-name").textContent = f.name;
-  $("v-info").textContent = fmtDims(f) + " · " + fmtSize(f.size);
-  $("v-pos").textContent = i + 1 + " / " + state.view.length;
-  $("v-raw").href = fileUrl(state.dir, f);
-  $("v-time").textContent = "";
-  if (view.f === f) return;
-  view.f = f;
+class Pane {
+  constructor() {
+    this.el = el("div", "pane");
+    this.stage = el("div", "stage");
+    this.layer = el("div", "layer");
+    this.thumb = el("img", "thumb");
+    this.img = el("img", "img");
+    this.thumb.alt = this.img.alt = "";
+    this.load = el("div", "load");
+    this.cap = el("div", "cap");
+    this.layer.append(this.thumb, this.img);
+    this.stage.append(this.layer, this.load);
+    this.el.append(this.stage, this.cap);
+    Object.assign(this, { f: null, s: 1, x: 0, y: 0, committed: 1, fitted: true, token: 0, timer: 0, drag: null });
+    this.bind();
+  }
 
-  // Show the (blurry) thumbnail instantly, then swap in the real render.
-  const cardImg = cards.get(f)?.querySelector("img");
-  vThumb.src = cardImg?.getAttribute("src") || (f.thumb ? thumbUrl(f) : "");
-  vThumb.hidden = !vThumb.getAttribute("src");
-  vImg.classList.remove("ready");
-  vImg.removeAttribute("src");
-  vLoad.replaceChildren(el("span", "spinner"), " rendering…");
-  vLoad.hidden = false;
-  fit();
+  setFile(f) {
+    this.f = f;
+    const token = ++this.token;
+    const t0 = performance.now();
+    this.cap.replaceChildren(el("b", null, f.name), el("span", null, fmtDims(f) + " · " + fmtSize(f.size)));
+    this.timeEl = el("span");
+    this.cap.append(this.timeEl);
+    $("v-time").textContent = "";
 
-  const token = ++loadToken;
-  const t0 = performance.now();
-  vImg.src = fileUrl(state.dir, f);
-  vImg.decode().then(() => {
-    if (token !== loadToken) return;
-    // decode() resolves once parsed; wait two frames so the paint is included.
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (token !== loadToken) return;
-      vImg.classList.add("ready");
-      vThumb.hidden = true;
-      vLoad.hidden = true;
-      $("v-time").textContent = Math.round(performance.now() - t0) + " ms";
-      prefetch(i + 1);
-    }));
-  }).catch(() => {
-    if (token !== loadToken) return;
-    vLoad.hidden = false;
-    vLoad.textContent = "⚠ cannot render this file";
+    // Show the (blurry) thumbnail instantly, then swap in the real render.
+    const cardImg = cards.get(f)?.querySelector("img");
+    this.thumb.src = cardImg?.getAttribute("src") || (f.thumb ? thumbUrl(f) : "");
+    this.thumb.hidden = !this.thumb.getAttribute("src");
+    this.img.classList.remove("ready");
+    this.img.removeAttribute("src");
+    this.load.replaceChildren(el("span", "spinner"), " rendering…");
+    this.load.hidden = false;
+
+    this.img.src = fileUrl(state.dir, f);
+    this.img.decode().then(() => {
+      if (token !== this.token) return;
+      // decode() resolves once parsed; wait two frames so the paint is included.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (token !== this.token) return;
+        this.img.classList.add("ready");
+        this.thumb.hidden = true;
+        this.load.hidden = true;
+        const ms = Math.round(performance.now() - t0) + " ms";
+        this.timeEl.textContent = ms;
+        if (this === panes[0]) $("v-time").textContent = ms;
+        if (!active()[1]) prefetch(state.current + 1);
+      }));
+    }).catch(() => {
+      if (token !== this.token) return;
+      this.load.textContent = "⚠ cannot render this file";
+    });
+  }
+
+  clear() {
+    this.token++;
+    this.f = null;
+    this.img.removeAttribute("src");
+    this.thumb.removeAttribute("src");
+    this.cap.replaceChildren();
+  }
+
+  apply() {
+    this.layer.style.transform = `translate(${this.x}px, ${this.y}px) scale(${this.s / this.committed})`;
+    showZoom();
+  }
+
+  commit() {
+    this.committed = this.s;
+    this.layer.style.width = this.f.w * this.s + "px";
+    this.layer.style.height = this.f.h * this.s + "px";
+    this.layer.classList.remove("moving");
+    this.apply();
+  }
+
+  interact() {
+    this.layer.classList.add("moving");
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.commit(), 250);
+  }
+
+  fitScale() {
+    const pad = 24;
+    return Math.max(MIN_ZOOM, Math.min((this.stage.clientWidth - pad * 2) / this.f.w,
+                                       (this.stage.clientHeight - pad * 2) / this.f.h));
+  }
+
+  fit(s) {
+    if (!this.f) return;
+    this.s = s ?? this.fitScale();
+    this.x = (this.stage.clientWidth - this.f.w * this.s) / 2;
+    this.y = (this.stage.clientHeight - this.f.h * this.s) / 2;
+    this.fitted = true;
+    clearTimeout(this.timer);
+    this.commit();
+  }
+
+  zoomAt(factor, cx, cy, now) {
+    if (!this.f) return;
+    const s = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, this.s * factor));
+    this.x = cx - (cx - this.x) * (s / this.s);
+    this.y = cy - (cy - this.y) * (s / this.s);
+    this.s = s;
+    this.fitted = false;
+    if (now) { clearTimeout(this.timer); this.commit(); }
+    else { this.apply(); this.interact(); }
+  }
+
+  panBy(dx, dy) {
+    this.x += dx;
+    this.y += dy;
+    this.fitted = false;
+    this.apply();
+  }
+
+  bind() {
+    const st = this.stage;
+    st.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const r = st.getBoundingClientRect();
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
+      const k = Math.exp(-e.deltaY * unit * 0.0015);
+      targets(this).forEach((q) => q.zoomAt(k, e.clientX - r.left, e.clientY - r.top));
+    }, { passive: false });
+    st.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      this.drag = { x: e.clientX, y: e.clientY };
+      st.setPointerCapture(e.pointerId);
+      st.classList.add("dragging");
+    });
+    st.addEventListener("pointermove", (e) => {
+      if (!this.drag) return;
+      const dx = e.clientX - this.drag.x, dy = e.clientY - this.drag.y;
+      this.drag = { x: e.clientX, y: e.clientY };
+      targets(this).forEach((q) => q.panBy(dx, dy));
+    });
+    const end = () => { this.drag = null; st.classList.remove("dragging"); };
+    st.addEventListener("pointerup", end);
+    st.addEventListener("pointercancel", end);
+    st.addEventListener("dblclick", (e) => {
+      const r = st.getBoundingClientRect();
+      if (Math.abs(this.s - 1) < 0.01) fitGroup(this);
+      else targets(this).forEach((q) => q.zoomAt(1 / q.s, e.clientX - r.left, e.clientY - r.top, true));
+    });
+    new ResizeObserver(() => { if (this.f && this.fitted && !this.el.hidden) fitGroup(this); }).observe(st);
+  }
+}
+
+// Fit the panes in the group; when linked they share one scale so sizes stay comparable.
+function fitGroup(p) {
+  const ps = targets(p).filter((q) => q.f);
+  const s = cmp.link && ps.length > 1 ? Math.min(...ps.map((q) => q.fitScale())) : undefined;
+  ps.forEach((q) => q.fit(s));
+}
+
+function showZoom() {
+  const z = active().filter((p) => p.f).map((p) => Math.round(p.s * 100));
+  $("v-zoom").textContent = z.every((v) => v === z[0]) ? z[0] + "%" : z.join("% | ") + "%";
+}
+
+function ensurePanes(n) {
+  while (panes.length < n) {
+    const p = new Pane();
+    panes.push(p);
+    panesEl.append(p.el);
+  }
+  panes.forEach((p, i) => {
+    const hide = i >= n;
+    if (hide && !p.el.hidden) p.clear();
+    p.el.hidden = hide;
   });
+}
+
+// Put file `f` into pane `p`, fitting it (and the neighbours if they are still fitted).
+function place(p, f) {
+  if (p.f === f) return;
+  p.setFile(f);
+  const others = active().filter((q) => q !== p && q.f);
+  if (others.every((q) => q.fitted)) fitGroup(null);
+  else if (cmp.link) p.fit(others[0].s);
+  else p.fit();
+}
+
+function openViewer(i, j = -1) {
+  const compare = j >= 0;
+  viewer.hidden = false;
+  viewer.classList.toggle("compare", compare);
+  panesEl.classList.toggle("stack", cmp.layout === "stack");
+  thumbs.pause(true);
+  state.current = i;
+  state.cmp = j;
+  ensurePanes(compare ? 2 : 1);
+  place(panes[0], state.view[i]);
+  if (compare) place(panes[1], state.view[j]);
+
+  const n = state.view.length, fa = state.view[i], fb = state.view[j];
+  $("v-name").textContent = compare ? fa.name + "  ⇄  " + fb.name : fa.name;
+  $("v-info").textContent = compare ? "" : fmtDims(fa) + " · " + fmtSize(fa.size);
+  $("v-pos").textContent = compare ? `A ${i + 1} · B ${j + 1} / ${n}` : i + 1 + " / " + n;
+  $("v-raw").href = fileUrl(state.dir, fa);
+  $("v-cmp").classList.toggle("on", compare);
+  $("v-link").classList.toggle("on", cmp.link);
+  showZoom();
 }
 
 function prefetch(i) {
@@ -397,12 +586,9 @@ function prefetch(i) {
 function closeViewer() {
   if (viewer.hidden) return;
   viewer.hidden = true;
-  loadToken++;
-  vImg.removeAttribute("src");
-  vThumb.removeAttribute("src");
-  const f = view.f;
-  view.f = null;
-  state.current = -1;
+  const f = panes[0]?.f;
+  panes.forEach((p) => p.clear());
+  state.current = state.cmp = -1;
   state.openedByPush = false;
   thumbs.pause(false);
   const card = f && cards.get(f);
@@ -414,100 +600,54 @@ function leaveViewer() {
   else writeHash(state.dir, null, false);
 }
 
-function step(d) {
+// Show the viewer state in the URL. `b` is the comparison file index or -1.
+function go(a, b) {
+  writeHash(state.dir, state.view[a].name, false, b >= 0 ? state.view[b].name : null);
+}
+
+// Step which file is shown. In compare mode `which` picks pane 0 (A) or 1 (B).
+function step(d, which = 0) {
   const n = state.view.length;
   if (!n) return;
-  const i = (state.current + d + n) % n;
-  writeHash(state.dir, state.view[i].name, false);
+  if (state.cmp < 0) return go((state.current + d + n) % n, -1);
+  let a = state.current, b = state.cmp;
+  const other = which ? a : b;
+  let i = which ? b : a;
+  do { i = (i + d + n) % n; } while (i === other && n > 1);
+  which ? (b = i) : (a = i);
+  go(a, b);
 }
 
-function apply() {
-  const k = view.s / view.committed;
-  layer.style.transform = `translate(${view.x}px, ${view.y}px) scale(${k})`;
-  $("v-zoom").textContent = Math.round(view.s * 100) + "%";
+function toggleCompare() {
+  const n = state.view.length;
+  if (state.current < 0) return;
+  if (state.cmp >= 0) return go(state.current, -1);
+  if (n < 2) return;
+  go(state.current, (state.current + 1) % n);
 }
 
-function commit() {
-  view.committed = view.s;
-  layer.style.width = view.f.w * view.s + "px";
-  layer.style.height = view.f.h * view.s + "px";
-  layer.classList.remove("moving");
-  apply();
+function setLayout(l) {
+  cmp.layout = l;
+  prefs.set("layout", l);
+  panesEl.classList.toggle("stack", l === "stack");
+}
+function setLink(on) {
+  cmp.link = on;
+  prefs.set("link", on ? "1" : "0");
+  $("v-link").classList.toggle("on", on);
+  if (on) fitGroup(null);
 }
 
-function interact() {
-  layer.classList.add("moving");
-  clearTimeout(commitTimer);
-  commitTimer = setTimeout(commit, 250);
-}
-
-function fit() {
-  if (!view.f) return;
-  const W = stage.clientWidth, H = stage.clientHeight, pad = 24;
-  view.s = Math.max(MIN_ZOOM, Math.min((W - pad * 2) / view.f.w, (H - pad * 2) / view.f.h));
-  center();
-  view.fitted = true;
-}
-
-function actual(cx, cy) {
-  if (cx == null) { cx = stage.clientWidth / 2; cy = stage.clientHeight / 2; }
-  zoomAt(1 / view.s, cx, cy, true);
-}
-
-function center() {
-  view.x = (stage.clientWidth - view.f.w * view.s) / 2;
-  view.y = (stage.clientHeight - view.f.h * view.s) / 2;
-  clearTimeout(commitTimer);
-  commit();
-}
-
-function zoomAt(factor, cx, cy, now) {
-  const s = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, view.s * factor));
-  view.x = cx - (cx - view.x) * (s / view.s);
-  view.y = cy - (cy - view.y) * (s / view.s);
-  view.s = s;
-  view.fitted = false;
-  if (now) { clearTimeout(commitTimer); commit(); }
-  else { apply(); interact(); }
-}
-
-stage.addEventListener("wheel", (e) => {
-  e.preventDefault();
-  const r = stage.getBoundingClientRect();
-  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
-  zoomAt(Math.exp(-e.deltaY * unit * 0.0015), e.clientX - r.left, e.clientY - r.top);
-}, { passive: false });
-
-let drag = null;
-stage.addEventListener("pointerdown", (e) => {
-  if (e.button !== 0) return;
-  drag = { x: e.clientX, y: e.clientY };
-  stage.setPointerCapture(e.pointerId);
-  stage.classList.add("dragging");
-});
-stage.addEventListener("pointermove", (e) => {
-  if (!drag) return;
-  view.x += e.clientX - drag.x;
-  view.y += e.clientY - drag.y;
-  drag = { x: e.clientX, y: e.clientY };
-  view.fitted = false;
-  apply();
-});
-const endDrag = () => { drag = null; stage.classList.remove("dragging"); };
-stage.addEventListener("pointerup", endDrag);
-stage.addEventListener("pointercancel", endDrag);
-stage.addEventListener("dblclick", (e) => {
-  const r = stage.getBoundingClientRect();
-  if (Math.abs(view.s - 1) < 0.01) fit();
-  else actual(e.clientX - r.left, e.clientY - r.top);
-});
-new ResizeObserver(() => { if (view.f && view.fitted) fit(); }).observe(stage);
+const zoomKeys = (k) => active().forEach((p) => p.zoomAt(k, p.stage.clientWidth / 2, p.stage.clientHeight / 2, true));
 
 $("v-close").addEventListener("click", leaveViewer);
-$("v-prev").addEventListener("click", () => step(-1));
-$("v-next").addEventListener("click", () => step(1));
-$("v-fit").addEventListener("click", fit);
-$("v-100").addEventListener("click", () => actual());
+$("v-prev").addEventListener("click", () => step(-1, 1));
+$("v-next").addEventListener("click", () => step(1, 1));
+$("v-fit").addEventListener("click", () => fitGroup(null));
+$("v-100").addEventListener("click", () => active().forEach((p) => p.zoomAt(1 / p.s, p.stage.clientWidth / 2, p.stage.clientHeight / 2, true)));
+$("v-cmp").addEventListener("click", toggleCompare);
+$("v-layout").addEventListener("click", () => setLayout(cmp.layout === "stack" ? "side" : "stack"));
+$("v-link").addEventListener("click", () => setLink(!cmp.link));
 
 // ---------------------------------------------------------------- controls & keys
 
@@ -562,21 +702,22 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (!viewer.hidden) {
-    const cx = stage.clientWidth / 2, cy = stage.clientHeight / 2;
+    const sh = e.shiftKey;
     const keys = {
       Escape: leaveViewer, Backspace: leaveViewer,
-      ArrowLeft: () => step(-1), ArrowRight: () => step(1), PageUp: () => step(-1), PageDown: () => step(1),
-      " ": () => step(1),
-      Home: () => writeHash(state.dir, state.view[0]?.name, false),
-      End: () => writeHash(state.dir, state.view.at(-1)?.name, false),
-      f: fit, "0": fit, "1": () => actual(),
-      "+": () => zoomAt(1.25, cx, cy, true), "=": () => zoomAt(1.25, cx, cy, true),
-      "-": () => zoomAt(0.8, cx, cy, true),
+      // In compare mode the arrows move B, Shift+arrows move A.
+      ArrowLeft: () => step(-1, sh ? 0 : 1), ArrowRight: () => step(1, sh ? 0 : 1),
+      PageUp: () => step(-1, 1), PageDown: () => step(1, 1), " ": () => step(1, 1),
+      Home: () => go(0, state.cmp), End: () => go(state.view.length - 1, state.cmp),
+      f: () => fitGroup(null), "0": () => fitGroup(null), "1": () => $("v-100").click(),
+      "+": () => zoomKeys(1.25), "=": () => zoomKeys(1.25), "-": () => zoomKeys(0.8),
+      c: toggleCompare, l: () => setLayout(cmp.layout === "stack" ? "side" : "stack"), y: () => setLink(!cmp.link),
     };
     const k = keys[e.key];
     if (k) { e.preventDefault(); k(); return; }
   }
-  if (e.key === "/") { e.preventDefault(); $("filter").focus(); }
+  if (e.key === "c" && viewer.hidden) compareSelected();
+  else if (e.key === "/") { e.preventDefault(); $("filter").focus(); }
   else if (e.key === "s") toggleSide();
   else if (e.key === "b") cycleBg();
   else if (e.key === "r") refresh();

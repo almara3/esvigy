@@ -24,6 +24,7 @@
     <div id="crumbs"></div>
     <span id="status"></span>
     <span class="grow"></span>
+    <button id="g-cmp" title="Compare the two selected files (c)" hidden>Compare 2</button>
     <select id="sort" title="Sort">
       <option value="name">Name</option>
       <option value="size">Size</option>
@@ -42,6 +43,9 @@
       <span id="v-info"></span>
       <span class="grow"></span>
       <span id="v-time"></span>
+      <button id="v-cmp" title="Compare with another file (c)">Compare</button>
+      <button id="v-layout" title="Side by side / stacked (l)">◫</button>
+      <button id="v-link" title="Link pan and zoom (y)">⛓</button>
       <button id="v-prev" title="Previous (←)">‹</button>
       <span id="v-pos"></span>
       <button id="v-next" title="Next (→)">›</button>
@@ -50,10 +54,7 @@
       <span id="v-zoom"></span>
       <a id="v-raw" target="_blank" title="Open the raw file in a new tab">raw ↗</a>
     </div>
-    <div id="stage">
-      <div id="layer"><img id="v-thumb" alt=""><img id="v-img" alt=""></div>
-      <div id="v-load"><span class="spinner"></span> rendering…</div>
-    </div>
+    <div id="panes"></div>
   </section>
 </main>
 <script src="/static/app.js"></script>

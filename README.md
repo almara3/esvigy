@@ -24,6 +24,9 @@ Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
   folder you've seen before opens instantly
 - Viewer shows the cached thumbnail immediately, then swaps in the full render
 - Pan (drag), zoom at cursor (wheel), double-click toggles fit / 100 %
+- **Compare**: Ctrl-click two thumbnails and press *Compare* (or `c`), or press `c` in the viewer.
+  Side by side or stacked (`l`), with pan/zoom linked between both (`y`). Arrows step B,
+  Shift+arrows step A, `c` goes back to a single file. The URL (`#file=a.svg&vs=b.svg`) is shareable.
 - Natural sort, filter, sort by size/date, `.svgz` support
 - **Open…** (or `o`) picks another folder with the native dialog (needs zenity or kdialog)
 - Back button / Esc returns to the grid; URL hash keeps folder and file
