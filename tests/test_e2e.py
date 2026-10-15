@@ -4,8 +4,11 @@ Skipped unless selenium is installed and Firefox is on PATH. Run only these with
 `pytest -m e2e`, or everything else with `pytest -m "not e2e"`.
 """
 
+import json
+import re
 import shutil
 import threading
+import time
 
 import pytest
 
@@ -42,6 +45,9 @@ def app(tmp_path_factory):
     opts.add_argument("--headless")
     opts.add_argument("--width=1300")
     opts.add_argument("--height=800")
+    # Same preferences as esvigy's own app window, so security settings there are tested too.
+    for name, value in re.findall(r'^user_pref\("([^"]+)", (.+)\);$', esvigy.USER_JS, re.M):
+        opts.set_preference(name, json.loads(value))
     driver = webdriver.Firefox(options=opts)
     try:
         yield driver, srv.url, root, base / "cache"
@@ -230,6 +236,19 @@ def test_svg_scripts_never_run(ui):
     assert "pwned" not in ui.d.title
     (ui.root / "evil.svg").unlink()
 
+
+
+def test_pdf_scripts_never_run_when_opened_raw(ui):
+    # Firefox's own PDF viewer ignores our CSP; only the app profile's preference stops this.
+    from selenium.common.exceptions import NoAlertPresentException
+    (ui.root / "evil").mkdir(exist_ok=True)
+    make_pdf(ui.root / "evil" / "js.pdf", [(595, 842, (1, 1, 1))], js=b"app.alert('pwned-pdf');")
+    ui.d.get(ui.url + "file/evil/js.pdf")
+    ui.wait(lambda: ui.js("return !!window.PDFViewerApplication?.pdfDocument"))
+    ui.wait(lambda: ui.js("return document.querySelector('.page canvas') != null"))
+    time.sleep(1.5)  # an OpenAction script would have run by now
+    with pytest.raises(NoAlertPresentException):
+        ui.d.switch_to.alert.dismiss()
 
 def test_page_without_token_shows_nothing(ui):
     base = ui.url.rsplit("/", 2)[0] + "/"  # http://127.0.0.1:PORT/

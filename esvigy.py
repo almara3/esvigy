@@ -43,7 +43,8 @@ META_NAME_RE = re.compile(r"[0-9a-f]{24}\.json")
 # SVG can carry scripts; never let it run anything when opened directly.
 SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox"
 # PDFs are drawn by our bundled pdf.js (fetched as data, so this doesn't apply there). Opened
-# directly via "raw", Firefox's own viewer shows them; nothing else may load or run.
+# directly via "raw", Firefox's own viewer shows them; it ignores this CSP, so PDF scripting is
+# switched off in the app profile instead (see USER_JS).
 PDF_CSP = "default-src 'none'"
 
 SVG_TAG_RE = re.compile(rb"<svg\b[^>]*>", re.S)
@@ -427,6 +428,8 @@ user_pref("browser.sessionstore.resume_from_crash", false);
 user_pref("datareporting.policy.dataSubmissionEnabled", false);
 user_pref("datareporting.healthreport.uploadEnabled", false);
 user_pref("app.update.auto", false);
+// Firefox's own PDF viewer ("raw" link) would run JavaScript embedded in PDFs; the CSP doesn't stop it.
+user_pref("pdfjs.enableScripting", false);
 """
 USER_CHROME_CSS = """\
 /* esvigy: hide tabs, address bar and bookmarks; keep only the page and the window frame. */

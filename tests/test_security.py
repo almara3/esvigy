@@ -151,6 +151,13 @@ def test_firefox_profile_is_private(tmp_path, monkeypatch):
     assert stat.S_IMODE((tmp_path / "profile").stat().st_mode) == 0o700
 
 
+
+def test_app_profile_disables_pdf_scripting(tmp_path, monkeypatch):
+    # "raw" opens PDFs in Firefox's own viewer, which would run their JavaScript.
+    monkeypatch.setattr(esvigy, "PROFILE_DIR", tmp_path / "profile")
+    esvigy.prepare_profile()
+    assert 'user_pref("pdfjs.enableScripting", false);' in (tmp_path / "profile" / "user.js").read_text()
+
 # ---------------------------------------------------------------- malformed requests
 # Each of these used to raise inside the handler instead of answering.
 

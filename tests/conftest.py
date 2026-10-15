@@ -11,12 +11,14 @@ import esvigy
 SMALL = '<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}"><rect width="{w}" height="{h}" fill="{c}"/></svg>'
 
 
-def make_pdf(path, pages, shapes=0):
+def make_pdf(path, pages, shapes=0, js=None):
     """Write a minimal valid PDF. `pages` is a list of (width_pt, height_pt, (r, g, b)).
 
     `shapes` adds that many small triangles to each page, to make it slow to draw.
+    `js` (bytes, balanced parentheses) is JavaScript the PDF runs when opened.
     """
-    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", None]
+    action = b" /OpenAction << /S /JavaScript /JS (%s) >>" % js if js else b""
+    objs = [b"<< /Type /Catalog /Pages 2 0 R%s >>" % action, None]
     kids = []
     for w, h, (r, g, b) in pages:
         # page filled with one colour, plus a black square in the top-left corner

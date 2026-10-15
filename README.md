@@ -16,6 +16,11 @@ UI runs in a Firefox window.
 
 Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
 
+**Firefox is recommended.** esvigy is built and tested only with Firefox: its fast SVG
+renderer is the reason esvigy exists, and only the app window (Firefox's own profile)
+gets esvigy's security settings, such as no scripts in PDFs opened via "raw ↗".
+Other browsers (`-b default`) should work, but are slower on big SVGs and untested.
+
 ## Features
 
 - Folder tree in the sidebar, thumbnail grid in the main panel
@@ -31,7 +36,7 @@ Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
 - File names get two lines in the grid (full name on hover)
 - **PDF** (page 1 for now): drawn by the bundled pdf.js (`static/vendor/pdfjs`, Mozilla, Apache-2.0),
   with thumbnails, zoom and compare like SVGs. Page size and page count show up once a PDF has
-  been rendered (they are cached next to the thumbnail). PDF scripts are never run.
+  been rendered (they are cached next to the thumbnail). PDF scripts never run in esvigy's viewer.
 - Natural sort, filter, sort by size/date, `.svgz` support
 - **Open…** (or `o`) picks another folder with the native dialog (needs zenity or kdialog)
 - Back button / Esc returns to the grid; URL hash keeps folder and file
@@ -59,6 +64,9 @@ Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
 - SVGs are shown via `<img>`, so scripts inside them never run; opened directly ("raw ↗")
   they get a CSP sandbox that blocks scripts and external loads. The UI forbids inline
   scripts and being framed by other sites.
+- PDFs opened via "raw ↗" are shown by the browser's own PDF viewer, which ignores the CSP. In the
+  app window (default) Firefox's PDF scripting is switched off; with `-b firefox`/`default` your
+  browser's own setting applies (in Firefox: `pdfjs.enableScripting` in `about:config`).
 - Thumbnails (`~/.cache/esvigy/thumbs`) and the Firefox profile are created `0700`. Thumbnails
   are kept forever; delete the folder to clear them.
 
@@ -82,7 +90,8 @@ window at a time can use that profile.
   cross-site writes, DNS rebinding, cache poisoning, malformed requests, escaping the root,
   security headers, file permissions
 - `tests/test_e2e.py`: the UI in headless Firefox via Selenium (grid, viewer, compare, table view).
-  Also checks in a real browser that a malicious SVG can't run scripts and that the CSP doesn't break the UI.
+  Also checks in a real browser that malicious SVGs and PDFs can't run scripts and that the CSP doesn't break the UI.
+  The browser gets the same preferences as esvigy's app profile.
   Skipped if Firefox or selenium is missing; geckodriver is downloaded on first run.
 
 Tests never touch your real thumbnail cache; it can also be redirected with `ESVIGY_CACHE=/some/dir`.
