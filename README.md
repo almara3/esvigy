@@ -9,7 +9,8 @@ UI runs in a Firefox window.
 
 ## Usage
 
-    ./esvigy.py [DIR | FILE.svg]      # opens a new Firefox window
+    ./esvigy.py [DIR | FILE.svg]      # opens its own Firefox window
+    ./esvigy.py ~/drawings -b firefox # normal Firefox window instead of the app window
     ./esvigy.py ~/drawings -b none    # just print the URL
     ./esvigy.py -h
 
@@ -42,3 +43,10 @@ Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
 
 - Binds to 127.0.0.1 only and only serves files below the given directory.
 - SVGs are shown via `<img>`, so scripts inside them never run.
+
+## Own window
+
+By default esvigy opens Firefox in a dedicated profile (`~/.local/share/esvigy/firefox-profile`)
+with the tab bar, address bar and bookmarks hidden, window class `esvigy`, and quits
+when you close the window. Your normal Firefox profile is untouched. Only one esvigy
+window at a time can use that profile.

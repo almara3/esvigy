@@ -310,23 +310,56 @@ class Handler(BaseHTTPRequestHandler):
         self.send_bytes(p.read_bytes(), "image/webp", headers={"Cache-Control": "max-age=31536000, immutable"})
 
 
+PROFILE_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "esvigy" / "firefox-profile"
+USER_JS = """\
+user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
+user_pref("browser.tabs.inTitlebar", 0);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.page", 0);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.tabs.warnOnClose", false);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("app.update.auto", false);
+"""
+USER_CHROME_CSS = """\
+/* esvigy: hide tabs, address bar and bookmarks; keep only the page and the window frame. */
+#TabsToolbar, #nav-bar, #PersonalToolbar, #toolbar-menubar { visibility: collapse !important; }
+"""
+
+
+def prepare_profile():
+    (PROFILE_DIR / "chrome").mkdir(parents=True, exist_ok=True)
+    (PROFILE_DIR / "user.js").write_text(USER_JS)
+    (PROFILE_DIR / "chrome" / "userChrome.css").write_text(USER_CHROME_CSS)
+
+
 def open_browser(url, browser):
+    """Launch the UI. Returns the Firefox process in app mode (so we can quit with its window), else None."""
     if browser == "none":
-        return
-    exe = shutil.which("firefox") if browser in ("auto", "firefox") else None
+        return None
+    exe = shutil.which("firefox") if browser in ("auto", "app", "firefox") else None
+    if exe and browser in ("auto", "app"):
+        prepare_profile()
+        return subprocess.Popen([exe, "--no-remote", "--profile", str(PROFILE_DIR), "--class", "esvigy",
+                                 "--name", "esvigy", "--new-window", url],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if exe:
         subprocess.Popen([exe, "--new-window", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
     else:
         webbrowser.open(url)
+    return None
 
 
 def main():
     ap = argparse.ArgumentParser(description="Fast SVG viewer (renders with Firefox).")
     ap.add_argument("path", nargs="?", default=".", help="directory (or SVG file) to browse")
     ap.add_argument("-p", "--port", type=int, default=0, help="port to listen on (default: random)")
-    ap.add_argument("-b", "--browser", choices=("auto", "firefox", "default", "none"), default="auto",
-                    help="browser to open (default: firefox if installed)")
+    ap.add_argument("-b", "--browser", choices=("auto", "app", "firefox", "default", "none"), default="auto",
+                    help="app: own Firefox window without tabs/toolbars, quits with the window (auto = app if "
+                         "Firefox is installed); firefox: normal new window; default: system browser; none: only print the URL")
     ap.add_argument("-v", "--verbose", action="store_true", help="log every request")
     args = ap.parse_args()
 
@@ -343,12 +376,17 @@ def main():
     if target.is_file():
         url += "#file=" + quote(target.name)
 
-    print(f"esvigy: serving {root}\n        {url}\n        Ctrl+C to quit", flush=True)
-    open_browser(url, args.browser)
+    print(f"esvigy: serving {root}\n        {url}\n        close the window or Ctrl+C to quit", flush=True)
+    proc = open_browser(url, args.browser)
+    if proc:
+        # Quit together with the window. With --no-remote and our own profile, the process lives exactly as long as it.
+        threading.Thread(target=lambda: (proc.wait(), server.shutdown()), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print()
+        if proc and proc.poll() is None:
+            proc.terminate()
 
 
 if __name__ == "__main__":
