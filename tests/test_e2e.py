@@ -316,3 +316,26 @@ def test_compare_pdf_with_svg(ui):
     ui.d.get(ui.url + "#dir=docs&file=a4.pdf&vs=two.pdf")
     ui.wait(lambda: ui.visible_panes() == 2)
     ui.wait(lambda: ui.js("return document.querySelectorAll('.pane:not([hidden]) canvas.ready').length") == 2)
+
+
+def test_compare_step_each_pane_or_both(ui):
+    # files: a.svg, b.svg, viewbox-only.svg
+    ui.d.get(ui.url + "#file=a.svg&vs=b.svg")
+    ui.wait(lambda: ui.visible_panes() == 2)
+    name = lambda: ui.by_id("v-name").text
+    cap_button = lambda pane, i: ui.d.find_elements(By.CSS_SELECTOR, ".pane")[pane] \
+        .find_elements(By.CSS_SELECTOR, ".cap button")[i]
+
+    cap_button(0, 1).click()  # A: next, skipping the file B shows
+    ui.wait(lambda: name() == "viewbox-only.svg ⇄ b.svg")
+    cap_button(1, 0).click()  # B: previous
+    ui.wait(lambda: name() == "viewbox-only.svg ⇄ a.svg")
+
+    ui.by_id("v-next").click()  # top bar: both panes, wrapping around
+    ui.wait(lambda: name() == "a.svg ⇄ b.svg")
+    ui.keys(Keys.ARROW_DOWN)  # both
+    ui.wait(lambda: name() == "b.svg ⇄ viewbox-only.svg")
+    ui.keys(Keys.ARROW_UP)
+    ui.wait(lambda: name() == "a.svg ⇄ b.svg")
+    ui.keys(Keys.ARROW_RIGHT)  # unchanged: B only
+    ui.wait(lambda: name() == "a.svg ⇄ viewbox-only.svg")

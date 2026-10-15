@@ -424,7 +424,8 @@ const active = () => panes.filter((p) => !p.el.hidden);
 const targets = (p) => (!p || cmp.link ? active() : [p]);
 
 class Pane {
-  constructor() {
+  constructor(idx) {
+    this.idx = idx;  // 0 = A (left/top), 1 = B
     this.el = el("div", "pane");
     this.stage = el("div", "stage");
     this.layer = el("div", "layer");
@@ -432,7 +433,18 @@ class Pane {
     this.img = el("img", "img");
     this.thumb.alt = this.img.alt = "";
     this.load = el("div", "load");
+    // Label with the file name and this pane's own ‹ › (compare mode only).
     this.cap = el("div", "cap");
+    this.info = el("span", "ci");
+    const btn = (text, d, title) => {
+      const b = el("button", null, text);
+      b.title = title;
+      b.addEventListener("click", () => step(d, this.idx));
+      return b;
+    };
+    const keys = idx ? "←/→" : "Shift+←/→";
+    this.cap.append(btn("‹", -1, `Previous file in this pane (${keys})`), this.info,
+                    btn("›", 1, `Next file in this pane (${keys})`));
     this.canvas = el("canvas", "img");  // PDFs are drawn here instead of in `img`
     this.layer.append(this.thumb, this.img, this.canvas);
     this.stage.append(this.layer, this.load);
@@ -446,9 +458,9 @@ class Pane {
     this.f = f;
     const token = ++this.token;
     const t0 = performance.now();
-    this.cap.replaceChildren(el("b", null, f.name), el("span", null, fmtDims(f) + " · " + fmtSize(f.size)));
     this.timeEl = el("span");
-    this.cap.append(this.timeEl);
+    this.info.replaceChildren(el("b", null, f.name), el("span", null, fmtDims(f) + " · " + fmtSize(f.size)),
+                              this.timeEl);
     $("v-time").textContent = "";
 
     // Show the (blurry) thumbnail instantly, then swap in the real render.
@@ -505,7 +517,7 @@ class Pane {
     const meta = { ...pdfDocs.size(this.page), pages: doc.numPages };
     if (Math.abs(meta.w - f.w) > 0.5 || Math.abs(meta.h - f.h) > 0.5 || meta.pages !== f.pages) {
       updateMeta(f, meta);
-      this.cap.querySelector("span").textContent = fmtDims(f) + " · " + fmtSize(f.size);
+      this.info.querySelector("span").textContent = fmtDims(f) + " · " + fmtSize(f.size);
       if (this === panes[0] && state.cmp < 0) $("v-info").textContent = fmtDims(f) + " · " + fmtSize(f.size);
     }
     if (this.fitted) fitGroup(this);  // calls commit(), which draws
@@ -547,7 +559,7 @@ class Pane {
     this.f = null;
     this.img.removeAttribute("src");
     this.thumb.removeAttribute("src");
-    this.cap.replaceChildren();
+    this.info.replaceChildren();
   }
 
   apply() {
@@ -651,7 +663,7 @@ function showZoom() {
 
 function ensurePanes(n) {
   while (panes.length < n) {
-    const p = new Pane();
+    const p = new Pane(panes.length);
     panes.push(p);
     panesEl.append(p.el);
   }
@@ -723,11 +735,13 @@ function go(a, b) {
   writeHash(state.dir, state.view[a].name, false, b >= 0 ? state.view[b].name : null);
 }
 
-// Step which file is shown. In compare mode `which` picks pane 0 (A) or 1 (B).
+// Step which file is shown. In compare mode `which` picks pane 0 (A), 1 (B) or "both";
+// moving both keeps their distance, so they can't land on the same file.
 function step(d, which = 0) {
   const n = state.view.length;
   if (!n) return;
   if (state.cmp < 0) return go((state.current + d + n) % n, -1);
+  if (which === "both") return go((state.current + d + n) % n, (state.cmp + d + n) % n);
   let a = state.current, b = state.cmp;
   const other = which ? a : b;
   let i = which ? b : a;
@@ -759,8 +773,8 @@ function setLink(on) {
 const zoomKeys = (k) => active().forEach((p) => p.zoomAt(k, p.stage.clientWidth / 2, p.stage.clientHeight / 2, true));
 
 $("v-close").addEventListener("click", leaveViewer);
-$("v-prev").addEventListener("click", () => step(-1, 1));
-$("v-next").addEventListener("click", () => step(1, 1));
+$("v-prev").addEventListener("click", () => step(-1, "both"));
+$("v-next").addEventListener("click", () => step(1, "both"));
 $("v-fit").addEventListener("click", () => fitGroup(null));
 $("v-100").addEventListener("click", () => active().forEach((p) => p.zoomAt(1 / p.s, p.stage.clientWidth / 2, p.stage.clientHeight / 2, true)));
 $("v-cmp").addEventListener("click", toggleCompare);
@@ -851,6 +865,7 @@ document.addEventListener("keydown", (e) => {
       // In compare mode the arrows move B, Shift+arrows move A.
       ArrowLeft: () => step(-1, sh ? 0 : 1), ArrowRight: () => step(1, sh ? 0 : 1),
       PageUp: () => step(-1, 1), PageDown: () => step(1, 1), " ": () => step(1, 1),
+      ArrowUp: () => step(-1, "both"), ArrowDown: () => step(1, "both"),
       Home: () => go(0, state.cmp), End: () => go(state.view.length - 1, state.cmp),
       f: () => fitGroup(null), "0": () => fitGroup(null), "1": () => $("v-100").click(),
       "+": () => zoomKeys(1.25), "=": () => zoomKeys(1.25), "-": () => zoomKeys(0.8),

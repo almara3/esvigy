@@ -269,17 +269,19 @@ body.no-side #side { display: none; }
   position: absolute;
   left: 8px; top: 8px;
   max-width: calc(100% - 16px);
-  padding: 2px 9px;
-  border-radius: 12px;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 3px;
+  border-radius: 14px;
   background: var(--panel);
   border: 1px solid var(--line);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  pointer-events: none;
+  pointer-events: none;  /* the label must not block panning; only its buttons take clicks */
 }
-.cap span { color: var(--muted); margin-left: 6px; }
-#viewer.compare .cap { display: block; }
+.cap .ci { min-width: 0; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; }
+.cap .ci span { color: var(--muted); margin-left: 6px; }
+.cap button { pointer-events: auto; flex: none; border-radius: 10px; padding: 0 7px; line-height: 1.4; }
+#viewer.compare .cap { display: flex; }
 #viewer:not(.compare) #v-layout, #viewer:not(.compare) #v-link { display: none; }
 #viewer.compare #v-time, #viewer.compare #v-raw { display: none; }
 #v-cmp.on, #v-link.on { background: var(--accent); border-color: var(--accent); color: #fff; }

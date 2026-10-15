@@ -30,8 +30,8 @@ Other browsers (`-b default`) should work, but are slower on big SVGs and untest
 - Viewer shows the cached thumbnail immediately, then swaps in the full render
 - Pan (drag), zoom at cursor (wheel), double-click toggles fit / 100 %
 - **Compare**: Ctrl-click two thumbnails and press *Compare* (or `c`), or press `c` in the viewer.
-  Side by side or stacked (`l`), with pan/zoom linked between both (`y`). Arrows step B,
-  Shift+arrows step A, `c` goes back to a single file. The URL (`#file=a.svg&vs=b.svg`) is shareable.
+  Side by side or stacked (`l`), with pan/zoom linked between both (`y`). Each pane has its own ‹ › in its label; ←/→ step B,
+  Shift+←/→ step A, and ↑/↓ or the top-bar ‹ › step both together. `c` goes back to a single file. The URL (`#file=a.svg&vs=b.svg`) is shareable.
 - Table view (`t`): full file names, dimensions, size and date; click a column header to sort, click again to reverse
 - File names get two lines in the grid (full name on hover)
 - **PDF** (page 1 for now): drawn by the bundled pdf.js (`static/vendor/pdfjs`, Mozilla, Apache-2.0),
