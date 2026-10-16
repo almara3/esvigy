@@ -264,6 +264,25 @@ body.no-side #side { display: none; }
   color: var(--muted);
 }
 .load[hidden] { display: none; }
+.pane.paged .load { bottom: 58px; }
+.pbar {
+  display: none;
+  position: absolute;
+  left: 50%; bottom: 14px;
+  transform: translateX(-50%);
+  align-items: center;
+  gap: 6px;
+  padding: 2px 3px;
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .15);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.pane.paged .pbar { display: flex; }
+.pbar button { border-radius: 10px; padding: 0 9px; line-height: 1.5; }
+.pbar button:disabled { opacity: .35; cursor: default; }
 .cap {
   display: none;
   position: absolute;

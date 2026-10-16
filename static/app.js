@@ -70,17 +70,22 @@ const state = {
 };
 
 // ---------------------------------------------------------------- routing
-// URL hash: #dir=<path>&file=<name>. Opening a file pushes history, so Back closes it.
+// URL hash: #dir=<path>&file=<name>[&vs=<name>][&page=<n>][&vspage=<n>]. Opening a file
+// pushes history, so Back closes it.
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  return { dir: p.get("dir") || "", file: p.get("file"), vs: p.get("vs") };
+  const page = (k) => Math.max(1, parseInt(p.get(k), 10) || 1);
+  return { dir: p.get("dir") || "", file: p.get("file"), vs: p.get("vs"),
+           page: page("page"), vspage: page("vspage") };
 }
-function writeHash(dir, file, push, vs) {
+function writeHash(dir, file, push, vs, page = 1, vspage = 1) {
   const p = new URLSearchParams();
   if (dir) p.set("dir", dir);
   if (file) p.set("file", file);
   if (file && vs) p.set("vs", vs);
+  if (file && page > 1) p.set("page", page);
+  if (file && vs && vspage > 1) p.set("vspage", vspage);
   const h = "#" + p.toString().replace(/\+/g, "%20");
   if (push) location.hash = h;
   else { history.replaceState(null, "", h); route(); }
@@ -89,7 +94,7 @@ function writeHash(dir, file, push, vs) {
 let routeToken = 0;
 async function route() {
   const token = ++routeToken;
-  const { dir, file, vs } = readHash();
+  const { dir, file, vs, page, vspage } = readHash();
   if (dir !== state.dir) {
     closeViewer();
     await loadDir(dir);
@@ -97,7 +102,7 @@ async function route() {
   }
   const i = file ? state.view.findIndex((f) => f.name === file) : -1;
   const j = vs ? state.view.findIndex((f) => f.name === vs) : -1;
-  if (i >= 0) openViewer(i, j);
+  if (i >= 0) openViewer(i, j, page, vspage);
   else closeViewer();
 }
 window.addEventListener("hashchange", route);
@@ -445,17 +450,32 @@ class Pane {
     const keys = idx ? "←/→" : "Shift+←/→";
     this.cap.append(btn("‹", -1, `Previous file in this pane (${keys})`), this.info,
                     btn("›", 1, `Next file in this pane (${keys})`));
+    // Page bar for multi-page PDFs.
+    this.pbar = el("div", "pbar");
+    this.pPrev = el("button", null, "‹");
+    this.pNext = el("button", null, "›");
+    this.pLabel = el("span");
+    this.pPrev.title = "Previous page in this pane";
+    this.pNext.title = "Next page in this pane";
+    this.pPrev.addEventListener("click", () => pageStep(-1, this.idx));
+    this.pNext.addEventListener("click", () => pageStep(1, this.idx));
+    this.pbar.append(this.pPrev, this.pLabel, this.pNext);
     this.canvas = el("canvas", "img");  // PDFs are drawn here instead of in `img`
     this.layer.append(this.thumb, this.img, this.canvas);
     this.stage.append(this.layer, this.load);
-    this.el.append(this.stage, this.cap);
-    Object.assign(this, { f: null, s: 1, x: 0, y: 0, committed: 1, fitted: true, token: 0, timer: 0, drag: null });
+    this.el.append(this.stage, this.cap, this.pbar);
+    // w/h: size of what is shown (for a PDF: the current page) in CSS px at 100 %.
+    Object.assign(this, { f: null, w: 1, h: 1, pageNo: 1, pages: 0,
+                          s: 1, x: 0, y: 0, committed: 1, fitted: true, token: 0, timer: 0, drag: null });
     this.bind();
   }
 
-  setFile(f) {
+  setFile(f, pageNo = 1) {
     this.closePdf();
     this.f = f;
+    this.w = f.w;
+    this.h = f.h;
+    this.pageNo = pageNo;
     const token = ++this.token;
     const t0 = performance.now();
     this.timeEl = el("span");
@@ -504,26 +524,57 @@ class Pane {
     }).catch(failed);
   }
 
-  // ---- PDF: pdf.js draws page 1 into a canvas sized for the committed zoom.
+  // ---- PDF: pdf.js draws the current page into a canvas sized for the committed zoom.
 
   async openPdf(token, done) {
     const f = this.f;
     const doc = await pdfDocs.open(fileUrl(state.dir, f));
     if (token !== this.token) return doc.loadingTask.destroy();
     this.doc = doc;
-    this.page = await doc.getPage(1);
+    this.pages = doc.numPages;
+    // The listing may only have guessed the size (of page 1); correct it.
+    const first = await doc.getPage(1);
     if (token !== this.token) return;
-    // The listing may only have guessed the size; correct it and re-fit.
-    const meta = { ...pdfDocs.size(this.page), pages: doc.numPages };
+    const meta = { ...pdfDocs.size(first), pages: doc.numPages };
     if (Math.abs(meta.w - f.w) > 0.5 || Math.abs(meta.h - f.h) > 0.5 || meta.pages !== f.pages) {
       updateMeta(f, meta);
       this.info.querySelector("span").textContent = fmtDims(f) + " · " + fmtSize(f.size);
       if (this === panes[0] && state.cmp < 0) $("v-info").textContent = fmtDims(f) + " · " + fmtSize(f.size);
     }
+    await this.showPage(this.pageNo);
+    if (token === this.token) done();
+  }
+
+  // Go to page `n` of the open PDF (or remember it until the PDF is open).
+  setPage(n) {
+    if (!this.doc) this.pageNo = n;
+    else if (n !== this.pageNo) this.showPage(n).catch((e) => console.warn("page failed", e));
+  }
+
+  async showPage(n) {
+    const token = this.token;
+    n = Math.max(1, Math.min(this.pages, n));
+    this.pageNo = n;
+    this.updatePageBar();
+    const page = await this.doc.getPage(n);
+    if (token !== this.token || this.pageNo !== n) return;
+    this.task?.cancel();
+    this.page = page;
+    ({ w: this.w, h: this.h } = pdfDocs.size(page));  // pages can differ in size
+    this.canvas.classList.remove("ready");  // don't show the previous page stretched
+    if (this.thumb.hidden) this.load.hidden = false;
     if (this.fitted) fitGroup(this);  // calls commit(), which draws
     else this.commit();
     await this.drawing;
-    if (token === this.token) done();
+    if (token === this.token && this.pageNo === n && this.thumb.hidden) this.load.hidden = true;
+  }
+
+  updatePageBar() {
+    const paged = this.pages > 1;
+    this.el.classList.toggle("paged", paged);
+    this.pLabel.textContent = this.pageNo + " / " + this.pages;
+    this.pPrev.disabled = this.pageNo <= 1;
+    this.pNext.disabled = this.pageNo >= this.pages;
   }
 
   // Redraw at the committed zoom. The old bitmap stays (stretched) until the new one is ready.
@@ -548,6 +599,8 @@ class Pane {
     this.task?.cancel();
     this.doc?.loadingTask.destroy();
     this.task = this.doc = this.page = this.drawing = null;
+    this.pages = 0;
+    this.updatePageBar();
     const blank = el("canvas", "img");
     this.canvas.replaceWith(blank);  // drop the old bitmap's memory
     this.canvas = blank;
@@ -569,8 +622,8 @@ class Pane {
 
   commit() {
     this.committed = this.s;
-    this.layer.style.width = this.f.w * this.s + "px";
-    this.layer.style.height = this.f.h * this.s + "px";
+    this.layer.style.width = this.w * this.s + "px";
+    this.layer.style.height = this.h * this.s + "px";
     this.layer.classList.remove("moving");
     this.apply();
     if (this.page) this.drawPdf();
@@ -584,15 +637,15 @@ class Pane {
 
   fitScale() {
     const pad = 24;
-    return Math.max(MIN_ZOOM, Math.min((this.stage.clientWidth - pad * 2) / this.f.w,
-                                       (this.stage.clientHeight - pad * 2) / this.f.h));
+    return Math.max(MIN_ZOOM, Math.min((this.stage.clientWidth - pad * 2) / this.w,
+                                       (this.stage.clientHeight - pad * 2) / this.h));
   }
 
   fit(s) {
     if (!this.f) return;
     this.s = s ?? this.fitScale();
-    this.x = (this.stage.clientWidth - this.f.w * this.s) / 2;
-    this.y = (this.stage.clientHeight - this.f.h * this.s) / 2;
+    this.x = (this.stage.clientWidth - this.w * this.s) / 2;
+    this.y = (this.stage.clientHeight - this.h * this.s) / 2;
     this.fitted = true;
     clearTimeout(this.timer);
     this.commit();
@@ -674,17 +727,17 @@ function ensurePanes(n) {
   });
 }
 
-// Put file `f` into pane `p`, fitting it (and the neighbours if they are still fitted).
-function place(p, f) {
-  if (p.f === f) return;
-  p.setFile(f);
+// Put file `f` (at page `page`) into pane `p`, fitting it (and the neighbours if they are still fitted).
+function place(p, f, page = 1) {
+  if (p.f === f) return p.setPage(page);
+  p.setFile(f, page);
   const others = active().filter((q) => q !== p && q.f);
   if (others.every((q) => q.fitted)) fitGroup(null);
   else if (cmp.link) p.fit(others[0].s);
   else p.fit();
 }
 
-function openViewer(i, j = -1) {
+function openViewer(i, j = -1, page = 1, vspage = 1) {
   const compare = j >= 0;
   viewer.hidden = false;
   viewer.classList.toggle("compare", compare);
@@ -693,8 +746,8 @@ function openViewer(i, j = -1) {
   state.current = i;
   state.cmp = j;
   ensurePanes(compare ? 2 : 1);
-  place(panes[0], state.view[i]);
-  if (compare) place(panes[1], state.view[j]);
+  place(panes[0], state.view[i], page);
+  if (compare) place(panes[1], state.view[j], vspage);
 
   const n = state.view.length, fa = state.view[i], fb = state.view[j];
   $("v-name").textContent = compare ? fa.name + "  ⇄  " + fb.name : fa.name;
@@ -730,9 +783,26 @@ function leaveViewer() {
   else writeHash(state.dir, null, false);
 }
 
-// Show the viewer state in the URL. `b` is the comparison file index or -1.
-function go(a, b) {
-  writeHash(state.dir, state.view[a].name, false, b >= 0 ? state.view[b].name : null);
+// Show the viewer state in the URL. `b` is the comparison file index or -1; pa/pb are pages.
+function go(a, b, pa = 1, pb = 1) {
+  writeHash(state.dir, state.view[a].name, false, b >= 0 ? state.view[b].name : null, pa, pb);
+}
+
+// Turn pages in pane `which` (0 or 1) or in every multi-page PDF shown ("both").
+// Returns false if nothing could turn (first/last page, or no multi-page PDF).
+function pageStep(d, which = "both") {
+  const ps = active();
+  const pages = ps.map((p, i) => (which === "both" || which === i) && p.pages > 1
+    ? Math.max(1, Math.min(p.pages, p.pageNo + d)) : p.pageNo);
+  if (pages.every((n, i) => n === ps[i].pageNo)) return false;
+  go(state.current, state.cmp, pages[0], pages[1] ?? 1);
+  return true;
+}
+
+// Page Up/Down: pages if a multi-page PDF is shown, otherwise files.
+function pageKey(d) {
+  if (active().some((p) => p.pages > 1)) pageStep(d);
+  else step(d, 1);
 }
 
 // Step which file is shown. In compare mode `which` picks pane 0 (A), 1 (B) or "both";
@@ -864,7 +934,7 @@ document.addEventListener("keydown", (e) => {
       Escape: leaveViewer, Backspace: leaveViewer,
       // In compare mode the arrows move B, Shift+arrows move A.
       ArrowLeft: () => step(-1, sh ? 0 : 1), ArrowRight: () => step(1, sh ? 0 : 1),
-      PageUp: () => step(-1, 1), PageDown: () => step(1, 1), " ": () => step(1, 1),
+      PageUp: () => pageKey(-1), PageDown: () => pageKey(1), " ": () => step(1, 1),
       ArrowUp: () => step(-1, "both"), ArrowDown: () => step(1, "both"),
       Home: () => go(0, state.cmp), End: () => go(state.view.length - 1, state.cmp),
       f: () => fitGroup(null), "0": () => fitGroup(null), "1": () => $("v-100").click(),

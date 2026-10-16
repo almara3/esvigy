@@ -46,9 +46,11 @@ with Cmd+Q (or press Ctrl+C in the terminal) to stop esvigy.
   Shift+←/→ step A, and ↑/↓ or the top-bar ‹ › step both together. `c` goes back to a single file. The URL (`#file=a.svg&vs=b.svg`) is shareable.
 - Table view (`t`): full file names, dimensions, size and date; click a column header to sort, click again to reverse
 - File names get two lines in the grid (full name on hover)
-- **PDF** (page 1 for now): drawn by the bundled pdf.js (`static/vendor/pdfjs`, Mozilla, Apache-2.0),
+- **PDF**: drawn by the bundled pdf.js (`static/vendor/pdfjs`, Mozilla, Apache-2.0),
   with thumbnails, zoom and compare like SVGs. Page size and page count show up once a PDF has
   been rendered (they are cached next to the thumbnail). PDF scripts never run in esvigy's viewer.
+  Multi-page PDFs get a ‹ n / N › page bar; Page Up/Down turn pages (in compare mode on both
+  sides; the page bars turn one side). The page is part of the URL (`&page=3`, `&vspage=2`).
 - Natural sort, filter, sort by size/date, `.svgz` support
 - **Open…** (or `o`) picks another folder with the native dialog (zenity or kdialog on Linux; built in on macOS and Windows)
 - Back button / Esc returns to the grid; URL hash keeps folder and file

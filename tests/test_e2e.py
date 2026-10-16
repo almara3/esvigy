@@ -35,6 +35,7 @@ def app(tmp_path_factory):
     (root / "docs").mkdir()
     make_pdf(root / "docs" / "a4.pdf", [(595, 842, (0, .5, .5))])
     make_pdf(root / "docs" / "two.pdf", [(842, 595, (.8, .1, .1)), (595, 842, (0, 0, 1))])
+    make_pdf(root / "docs" / "three.pdf", [(595, 842, (0, .6, 0)), (595, 842, (1, .8, 0)), (595, 842, (.8, 0, .8))])
     # too much for one drawing slice: guards against thumbnails that never finish
     make_pdf(root / "docs" / "heavy.pdf", [(595, 842, (1, 1, 1))], shapes=150_000)
     old_cache, esvigy.CACHE_DIR = esvigy.CACHE_DIR, base / "cache"
@@ -284,14 +285,14 @@ def pane_pixel(ui, fx, fy):
 
 def test_pdf_thumbnails_and_page_info(ui):
     ui.d.get(ui.url + "#dir=docs")
-    ui.wait(lambda: ui.card_names() == ["a4.pdf", "heavy.pdf", "two.pdf"])
+    ui.wait(lambda: ui.card_names() == ["a4.pdf", "heavy.pdf", "three.pdf", "two.pdf"])
     ui.wait(lambda: ui.js("return [...document.querySelectorAll('.card img')].every(i => i.getAttribute('src'))"),
             timeout=60)
     # the browser measured the PDFs: real page size and page count replace the placeholder
     dims = lambda: ui.js("return [...document.querySelectorAll('.card .dims')].map(e => e.textContent)")
-    ui.wait(lambda: dims() == ["793×1123 · 1 page", "793×1123 · 1 page", "1123×793 · 2 pages"])
+    ui.wait(lambda: dims() == ["793×1123 · 1 page", "793×1123 · 1 page", "793×1123 · 3 pages", "1123×793 · 2 pages"])
     assert not ui.d.find_elements(By.CSS_SELECTOR, ".card .note")  # no "cannot render"
-    assert len(list(ui.cache.glob("*.json"))) >= 3
+    assert len(list(ui.cache.glob("*.json"))) >= 4
 
 
 def test_pdf_viewer_draws_the_page(ui):
@@ -339,3 +340,68 @@ def test_compare_step_each_pane_or_both(ui):
     ui.wait(lambda: name() == "a.svg ⇄ b.svg")
     ui.keys(Keys.ARROW_RIGHT)  # unchanged: B only
     ui.wait(lambda: name() == "a.svg ⇄ viewbox-only.svg")
+
+
+def pane_state(ui, i):
+    """Page label, layer aspect (w/h) and centre colour of visible pane `i`."""
+    return ui.js("""
+        const p = [...document.querySelectorAll('.pane')].filter(p => !p.hidden)[arguments[0]];
+        if (!p) return { label: null, aspect: null, rgb: null };
+        const c = p.querySelector('canvas.ready'), l = p.querySelector('.layer');
+        let rgb = null;
+        if (c) { const d = c.getContext('2d').getImageData(c.width >> 1, c.height >> 1, 1, 1).data;
+                 rgb = [d[0], d[1], d[2]]; }
+        return { label: p.classList.contains('paged') ? p.querySelector('.pbar span').textContent : null,
+                 aspect: l.offsetWidth / l.offsetHeight, rgb };
+    """, i)
+
+
+def test_pdf_pages(ui):
+    ui.d.get(ui.url + "#dir=docs&file=two.pdf")
+    ui.wait(lambda: pane_state(ui, 0)["rgb"] == [204, 26, 26])
+    st = pane_state(ui, 0)
+    assert st["label"] == "1 / 2" and st["aspect"] > 1  # page 1: landscape, red
+
+    ui.keys(Keys.PAGE_DOWN)
+    ui.wait(lambda: pane_state(ui, 0)["rgb"] == [0, 0, 255])
+    st = pane_state(ui, 0)
+    assert st["label"] == "2 / 2" and st["aspect"] < 1  # page 2: portrait, blue
+    assert "page=2" in ui.hash()
+
+    ui.keys(Keys.PAGE_DOWN)  # last page: stays (does not jump to another file)
+    assert "file=two.pdf" in ui.hash() and pane_state(ui, 0)["label"] == "2 / 2"
+
+    ui.d.find_element(By.CSS_SELECTOR, ".pane .pbar button").click()  # ‹
+    ui.wait(lambda: pane_state(ui, 0)["label"] == "1 / 2")
+    assert "page=" not in ui.hash()
+
+
+def test_pdf_page_deep_link_and_file_step_resets_page(ui):
+    ui.d.get(ui.url + "#dir=docs&file=three.pdf&page=3")
+    ui.wait(lambda: pane_state(ui, 0)["rgb"] == [204, 0, 204])
+    ui.keys(Keys.ARROW_RIGHT)  # next file starts at page 1
+    ui.wait(lambda: ui.by_id("v-name").text == "two.pdf")
+    assert "page=" not in ui.hash()
+
+
+def test_compare_turns_pages_together_or_per_pane(ui):
+    ui.d.get(ui.url + "#dir=docs&file=two.pdf&vs=three.pdf")
+    ui.wait(lambda: pane_state(ui, 1)["label"] == "1 / 3")
+
+    ui.keys(Keys.PAGE_DOWN)  # both
+    ui.wait(lambda: (pane_state(ui, 0)["label"], pane_state(ui, 1)["label"]) == ("2 / 2", "2 / 3"))
+    ui.keys(Keys.PAGE_DOWN)  # A is at its end, B goes on
+    ui.wait(lambda: (pane_state(ui, 0)["label"], pane_state(ui, 1)["label"]) == ("2 / 2", "3 / 3"))
+    assert "page=2" in ui.hash() and "vspage=3" in ui.hash()
+
+    pb = ui.d.find_elements(By.CSS_SELECTOR, ".pane")[1].find_elements(By.CSS_SELECTOR, ".pbar button")
+    pb[0].click()  # B only
+    ui.wait(lambda: (pane_state(ui, 0)["label"], pane_state(ui, 1)["label"]) == ("2 / 2", "2 / 3"))
+    ui.wait(lambda: pane_state(ui, 1)["rgb"] == [255, 204, 0])
+
+
+def test_page_keys_step_files_without_multipage_pdf(ui):
+    ui.d.get(ui.url + "#file=a.svg")
+    ui.wait(ui.viewer_open)
+    ui.keys(Keys.PAGE_DOWN)
+    ui.wait(lambda: ui.by_id("v-name").text == "b.svg")
