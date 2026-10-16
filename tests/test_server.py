@@ -196,7 +196,8 @@ def test_put_elsewhere_is_not_found(server):
 # ---------------------------------------------------------------- open folder dialog
 
 def fake_dialog(tmp_path, monkeypatch, script):
-    """Put a fake `zenity` first on PATH."""
+    """Put a fake `zenity` first on PATH (and pretend to be Linux, so macOS/Windows don't use their own dialog)."""
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     exe = bindir / "zenity"
@@ -209,6 +210,7 @@ def test_open_needs_custom_header(server):
     assert server.request("POST", "/api/open").status == 403
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="fake zenity is a shell script")
 def test_open_switches_root(server, tmp_path, monkeypatch):
     other = tmp_path / "other"
     other.mkdir()
@@ -219,6 +221,7 @@ def test_open_switches_root(server, tmp_path, monkeypatch):
     assert [f["name"] for f in server.get_json("/api/list")["files"]] == ["z.svg"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="fake zenity is a shell script")
 def test_open_cancelled_keeps_root(server, tmp_path, monkeypatch):
     fake_dialog(tmp_path, monkeypatch, "exit 1\n")
     assert server.request("POST", "/api/open", headers={"X-Esvigy": "1"}).status == 204
@@ -226,6 +229,7 @@ def test_open_cancelled_keeps_root(server, tmp_path, monkeypatch):
 
 
 def test_open_without_dialog_tool(server, monkeypatch):
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
     monkeypatch.setattr(esvigy, "find_program", lambda name: None)
     assert server.request("POST", "/api/open", headers={"X-Esvigy": "1"}).status == 501
 

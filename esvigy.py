@@ -284,7 +284,12 @@ class Handler(BaseHTTPRequestHandler):
         CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
         tmp = CACHE_DIR / f".{name}.{threading.get_ident()}"
         tmp.write_bytes(data)
-        tmp.replace(CACHE_DIR / name)
+        try:
+            tmp.replace(CACHE_DIR / name)
+        except PermissionError:
+            # Windows can't replace a file that is open (being served, or a racing upload of the
+            # same key). Keys are content-addressed, so the copy already there is just as good.
+            tmp.unlink(missing_ok=True)
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Content-Length", "0")
         self.end_headers()

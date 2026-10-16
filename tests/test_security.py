@@ -373,3 +373,13 @@ def test_colons_and_backslashes_are_plain_names_elsewhere(server):
     (server.root / "a:b\\c.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>')
     assert "a:b\\c.svg" in [f["name"] for f in server.get_json("/api/list")["files"]]
     assert server.request("GET", "/file/a%3Ab%5Cc.svg").status == 200
+
+
+def test_thumb_upload_survives_locked_target(server, monkeypatch):
+    # Windows refuses to replace a file that is open; the upload must not fail or leave temp files.
+    def locked(self, target):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(esvigy.Path, "replace", locked)
+    assert server.request("PUT", f"/thumb/{KEY}.webp", body=WEBP, headers=PUT_HEADERS).status == 204
+    assert not [p for p in server.cache.iterdir() if p.name.startswith(".")]
