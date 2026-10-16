@@ -178,6 +178,10 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def resolve(root, rel):
         """Map a client-supplied relative path to a real path inside `root`, or None."""
+        # On Windows, "\\server\share" or "C:" would make resolve() touch other drives or the
+        # network (leaking the login hash over SMB) before the check below; ":" also names NTFS streams.
+        if sys.platform == "win32" and ("\\" in rel or ":" in rel):
+            return None
         try:
             p = (root / rel.lstrip("/")).resolve()
         except (OSError, RuntimeError, ValueError):  # ValueError: NUL byte in the path
@@ -338,22 +342,19 @@ class Handler(BaseHTTPRequestHandler):
                     files.append(f)
             except (OSError, RuntimeError):
                 continue
-        rel_root = "" if d == root else str(d.relative_to(root))
+        rel_root = "" if d == root else d.relative_to(root).as_posix()
         self.send_json({"dir": rel_root, "root": root.name or str(root), "dirs": dirs, "files": files})
 
     def api_open(self):
         """Pick a folder with the desktop's native dialog and make it the new root."""
-        cmd = None
-        if shutil.which("zenity"):
-            cmd = ["zenity", "--file-selection", "--directory", "--title=Open folder",
-                   f"--filename={self.server.root}/"]
-        elif shutil.which("kdialog"):
-            cmd = ["kdialog", "--getexistingdirectory", str(self.server.root)]
+        cmd = folder_dialog_cmd(self.server.root)
         if cmd is None:
             return self.fail(HTTPStatus.NOT_IMPLEMENTED, "install zenity or kdialog to use Open")
         with self.server.open_lock:
             try:
-                r = subprocess.run(cmd, capture_output=True, text=True)
+                # The start folder goes in through the environment, never into a script's source.
+                r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace",
+                                   env={**os.environ, "ESVIGY_START": str(self.server.root)})
             except OSError:
                 return self.fail(HTTPStatus.INTERNAL_SERVER_ERROR, "cannot start the folder dialog")
             chosen = Path(r.stdout.strip()).expanduser() if r.returncode == 0 and r.stdout.strip() else None
@@ -416,6 +417,61 @@ class Handler(BaseHTTPRequestHandler):
         self.send_bytes(p.read_bytes(), "image/webp", headers={"Cache-Control": "max-age=31536000, immutable"})
 
 
+# Native folder pickers. Each prints the chosen path and exits non-zero on cancel.
+MAC_DIALOG = ('POSIX path of (choose folder with prompt "Open folder" '
+              'default location (POSIX file (system attribute "ESVIGY_START")))')
+WIN_DIALOG = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+              "Add-Type -AssemblyName System.Windows.Forms; "
+              "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+              "$d.SelectedPath = $env:ESVIGY_START; "
+              "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath } else { exit 1 }")
+
+
+def find_program(name):
+    """Full path of program `name` from the absolute PATH entries, or None.
+
+    Not shutil.which(): on Windows it (and subprocess, given a bare name) looks in the current
+    directory first and accepts .bat/.cmd, so a planted firefox.bat in the folder esvigy was
+    started from would run. Here relative PATH entries are skipped and only .exe counts on Windows.
+    """
+    ext = ".exe" if sys.platform == "win32" else ""
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d or not os.path.isabs(d):
+            continue
+        p = Path(d) / (name + ext)
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return None
+
+
+def folder_dialog_cmd(start):
+    """Command line (with the program's full path) for the desktop's folder picker, or None."""
+    if sys.platform == "win32":
+        ps = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        return [str(ps), "-NoProfile", "-NonInteractive", "-STA", "-Command", WIN_DIALOG] if ps.is_file() else None
+    if sys.platform == "darwin":
+        return ["/usr/bin/osascript", "-e", MAC_DIALOG] if Path("/usr/bin/osascript").is_file() else None
+    if exe := find_program("zenity"):
+        return [exe, "--file-selection", "--directory", "--title=Open folder", f"--filename={start}/"]
+    if exe := find_program("kdialog"):
+        return [exe, "--getexistingdirectory", str(start)]
+    return None
+
+
+def find_firefox():
+    """Firefox's full path. On macOS and Windows it is usually not on PATH, so look where it gets installed first."""
+    if sys.platform == "darwin":
+        candidates = [Path(base) / "Firefox.app" / "Contents" / "MacOS" / "firefox"
+                      for base in ("/Applications", Path.home() / "Applications")]
+    elif sys.platform == "win32":
+        candidates = [Path(os.environ[var]) / "Mozilla Firefox" / "firefox.exe"
+                      for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")
+                      if os.path.isabs(os.environ.get(var, ""))]
+    else:
+        candidates = []
+    return next((str(p) for p in candidates if p.is_file()), None) or find_program("firefox")
+
+
 PROFILE_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "esvigy" / "firefox-profile"
 USER_JS = """\
 user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
@@ -449,12 +505,15 @@ def open_browser(url, browser):
     """Launch the UI. Returns the Firefox process in app mode (so we can quit with its window), else None."""
     if browser == "none":
         return None
-    exe = shutil.which("firefox") if browser in ("auto", "app", "firefox") else None
+    exe = find_firefox() if browser in ("auto", "app", "firefox") else None
     if exe and browser in ("auto", "app"):
         prepare_profile()
-        return subprocess.Popen([exe, "--no-remote", "--profile", str(PROFILE_DIR), "--class", "esvigy",
-                                 "--name", "esvigy", "--new-window", url],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        args = [exe, "--no-remote", "--profile", str(PROFILE_DIR)]
+        if sys.platform == "win32":
+            args.append("--wait-for-browser")  # firefox.exe is a launcher that exits right away otherwise
+        elif sys.platform != "darwin":
+            args += ["--class", "esvigy", "--name", "esvigy"]  # X11/Wayland window class
+        return subprocess.Popen(args + ["--new-window", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if exe:
         subprocess.Popen([exe, "--new-window", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)

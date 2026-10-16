@@ -293,7 +293,8 @@ def test_open_dialog_does_not_block_other_requests(server, tmp_path, monkeypatch
         release.wait(5)
         raise OSError("cancelled")
 
-    monkeypatch.setattr(esvigy.shutil, "which", lambda name: "/bin/true" if name == "zenity" else None)
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
+    monkeypatch.setattr(esvigy, "find_program", lambda name: "/bin/true" if name == "zenity" else None)
     monkeypatch.setattr(esvigy.subprocess, "run", slow_dialog)
     t = threading.Thread(target=server.request, args=("POST", "/api/open"), kwargs={"headers": PUT_HEADERS})
     t.start()
@@ -302,3 +303,73 @@ def test_open_dialog_does_not_block_other_requests(server, tmp_path, monkeypatch
     finally:
         release.set()
         t.join()
+
+
+# ---------------------------------------------------------------- programs we start (binary planting)
+# On Windows, shutil.which() and subprocess look in the current directory first and accept
+# .bat/.cmd. A planted firefox.bat in the folder esvigy is started from must never run.
+
+def plant(folder, *names):
+    folder.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (folder / n).write_text("@echo pwned\n")
+        (folder / n).chmod(0o755)
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32", "darwin"])
+def test_programs_are_never_taken_from_the_current_directory(tmp_path, monkeypatch, platform):
+    cwd = tmp_path / "Downloads"
+    plant(cwd, "firefox", "firefox.exe", "firefox.bat", "firefox.cmd", "zenity", "zenity.exe", "zenity.bat",
+          "kdialog", "kdialog.exe", "powershell.exe", "powershell.bat", "osascript")
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(esvigy.sys, "platform", platform)
+    monkeypatch.setattr(esvigy.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("SystemRoot", str(tmp_path / "Windows"))  # no real powershell there
+    monkeypatch.setenv("PATH", os.pathsep.join([".", "", "Downloads", "bin"]))  # relative entries only
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        monkeypatch.setenv(var, ".")
+    assert esvigy.find_firefox() is None
+    assert esvigy.find_program("zenity") is None
+    cmd = esvigy.folder_dialog_cmd(tmp_path)
+    if platform != "darwin":  # macOS uses the fixed /usr/bin/osascript
+        assert cmd is None
+    else:
+        assert cmd is None or cmd[0] == "/usr/bin/osascript"
+
+
+def test_windows_only_runs_exe_files(tmp_path, monkeypatch):
+    plant(tmp_path / "bin", "firefox.bat", "firefox.cmd", "firefox")
+    monkeypatch.setattr(esvigy.sys, "platform", "win32")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    assert esvigy.find_program("firefox") is None
+    plant(tmp_path / "bin", "firefox.exe")
+    assert esvigy.find_program("firefox") == str(tmp_path / "bin" / "firefox.exe")
+
+
+def test_started_programs_are_full_paths(tmp_path, monkeypatch):
+    plant(tmp_path / "bin", "zenity")
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    assert os.path.isabs(esvigy.folder_dialog_cmd("/x")[0])
+    plant(tmp_path / "Windows" / "System32" / "WindowsPowerShell" / "v1.0", "powershell.exe")
+    monkeypatch.setattr(esvigy.sys, "platform", "win32")
+    monkeypatch.setenv("SystemRoot", str(tmp_path / "Windows"))
+    assert esvigy.folder_dialog_cmd("/x")[0] == str(tmp_path / "Windows" / "System32" / "WindowsPowerShell"
+                                                     / "v1.0" / "powershell.exe")
+
+
+# ---------------------------------------------------------------- Windows paths
+
+@pytest.mark.parametrize("rel", [r"\\evil.example\share\x.svg", r"..\..\x.svg", "C:/Windows/x.svg",
+                                 "c:x.svg", "a.svg:stream", "sub\\mm.svg"])
+def test_windows_paths_are_refused_before_touching_disk_or_network(tree, monkeypatch, rel):
+    monkeypatch.setattr(esvigy.sys, "platform", "win32")
+    monkeypatch.setattr(esvigy.Path, "resolve", lambda *a, **k: pytest.fail("resolve() was called"))
+    assert esvigy.Handler.resolve(tree, rel) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file names")
+def test_colons_and_backslashes_are_plain_names_elsewhere(server):
+    (server.root / "a:b\\c.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>')
+    assert "a:b\\c.svg" in [f["name"] for f in server.get_json("/api/list")["files"]]
+    assert server.request("GET", "/file/a%3Ab%5Cc.svg").status == 200

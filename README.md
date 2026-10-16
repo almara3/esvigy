@@ -7,6 +7,10 @@ slow on big files. Firefox's renderer is much faster, so esvigy uses Firefox as
 its engine: a tiny local Python server (stdlib only) serves the folder, and the
 UI runs in a Firefox window.
 
+![The thumbnail grid](docs/grid.png)
+
+![Compare mode: two files side by side with linked pan and zoom](docs/compare.png)
+
 ## Usage
 
     ./esvigy.py [DIR | FILE.svg]      # opens its own Firefox window
@@ -20,6 +24,14 @@ Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
 renderer is the reason esvigy exists, and only the app window (Firefox's own profile)
 gets esvigy's security settings, such as no scripts in PDFs opened via "raw ↗".
 Other browsers (`-b default`) should work, but are slower on big SVGs and untested.
+
+### macOS and Windows
+
+esvigy is developed on Linux; macOS and Windows are supported but less tested. Python 3.9+
+is all you need. Run it as `python3 esvigy.py` (macOS) or `py esvigy.py` (Windows). Firefox
+is found in its usual install location (`/Applications`, `~/Applications`, `Program Files`)
+even when it isn't on `PATH`. On macOS, closing the window doesn't quit Firefox, so quit it
+with Cmd+Q (or press Ctrl+C in the terminal) to stop esvigy.
 
 ## Features
 
@@ -38,7 +50,7 @@ Other browsers (`-b default`) should work, but are slower on big SVGs and untest
   with thumbnails, zoom and compare like SVGs. Page size and page count show up once a PDF has
   been rendered (they are cached next to the thumbnail). PDF scripts never run in esvigy's viewer.
 - Natural sort, filter, sort by size/date, `.svgz` support
-- **Open…** (or `o`) picks another folder with the native dialog (needs zenity or kdialog)
+- **Open…** (or `o`) picks another folder with the native dialog (zenity or kdialog on Linux; built in on macOS and Windows)
 - Back button / Esc returns to the grid; URL hash keeps folder and file
 
 ## Keys
@@ -67,15 +79,48 @@ Other browsers (`-b default`) should work, but are slower on big SVGs and untest
 - PDFs opened via "raw ↗" are shown by the browser's own PDF viewer, which ignores the CSP. In the
   app window (default) Firefox's PDF scripting is switched off; with `-b firefox`/`default` your
   browser's own setting applies (in Firefox: `pdfjs.enableScripting` in `about:config`).
+- Programs esvigy starts (Firefox, the folder dialog) are run by full path, found only in
+  absolute `PATH` entries or their usual install locations, never in the current folder. On
+  Windows only `.exe` files count, so a planted `firefox.bat` next to your files can't run.
 - Thumbnails (`~/.cache/esvigy/thumbs`) and the Firefox profile are created `0700`. Thumbnails
   are kept forever; delete the folder to clear them.
 
 ## Own window
 
 By default esvigy opens Firefox in a dedicated profile (`~/.local/share/esvigy/firefox-profile`)
-with the tab bar, address bar and bookmarks hidden, window class `esvigy`, and quits
+with the tab bar, address bar and bookmarks hidden, window class `esvigy` (Linux), and quits
 when you close the window. Your normal Firefox profile is untouched. Only one esvigy
 window at a time can use that profile.
+
+## Benchmark
+
+How long does a big SVG take to get on screen at 1600×1200? librsvg is what xviewer, eog and most
+file-manager thumbnailers use; it is called here the same way they do (GdkPixbuf). Firefox is what
+esvigy uses (`<img>` + `decode()`, as in its viewer). Median of 3 runs.
+
+| file | size | librsvg (eog, xviewer) | Firefox (esvigy) | speed-up |
+| --- | ---: | ---: | ---: | ---: |
+| filters-blur.svg (blur, mask, shadow) | 0.0 MB | 2.55 s | 0.24 s | 11× |
+| paths-3000.svg (3000 polylines) | 2.7 MB | 0.92 s | 0.29 s | 3× |
+| clipped-7000.svg (7000 clipped paths) | 5.3 MB | 2.37 s | 1.38 s | 2× |
+| scatter-250k.svg (250 000 circles) | 18.7 MB | 3.44 s | 3.59 s | 1× |
+
+The gain depends on what is in the file: big with filters, modest with many paths, none with
+a plain pile of circles. These generated files are not the worst case, though: a real 6.9 MB matplotlib
+figure (a shaded `pcolormesh`: about 3 600 gradients and 7 400 paths) took **35 s in librsvg and 0.56 s in
+Firefox**. I could not reproduce that with a generated file (not shared; it is private work data), so
+treat it as one data point rather than a typical result.
+
+Where esvigy helps beyond the raw render time: the render happens in a separate Firefox process, so the
+UI never freezes, and thumbnails are cached, so a folder you've seen before opens instantly.
+
+Measured on an AMD Ryzen 5 5500U, Linux Mint 21.2, librsvg 2.52.5, Firefox 155 (headless).
+Reproduce with:
+
+    python3 benchmark/gen.py heavy /tmp/heavy
+    .venv/bin/python benchmark/bench.py /tmp/heavy   # needs the system python3 with PyGObject
+
+The screenshots above come from `.venv/bin/python docs/screenshots.py`.
 
 ## Tests
 

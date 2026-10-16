@@ -226,8 +226,79 @@ def test_open_cancelled_keeps_root(server, tmp_path, monkeypatch):
 
 
 def test_open_without_dialog_tool(server, monkeypatch):
-    monkeypatch.setattr(esvigy.shutil, "which", lambda name: None)
+    monkeypatch.setattr(esvigy, "find_program", lambda name: None)
     assert server.request("POST", "/api/open", headers={"X-Esvigy": "1"}).status == 501
+
+
+def fake_exe(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+    path.chmod(0o755)
+    return path
+
+
+def test_open_dialog_on_windows(tmp_path, monkeypatch):
+    ps = fake_exe(tmp_path / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+    monkeypatch.setattr(esvigy.sys, "platform", "win32")
+    monkeypatch.setenv("SystemRoot", str(tmp_path))
+    cmd = esvigy.folder_dialog_cmd("/x'\"; evil")
+    assert cmd[0] == str(ps) and "ESVIGY_START" in cmd[-1]
+    assert "evil" not in " ".join(cmd)  # the start folder is passed via the environment only
+
+
+def test_open_dialog_on_mac(monkeypatch):
+    monkeypatch.setattr(esvigy.sys, "platform", "darwin")
+    real_is_file = esvigy.Path.is_file
+    monkeypatch.setattr(esvigy.Path, "is_file", lambda p: str(p) == "/usr/bin/osascript" or real_is_file(p))
+    cmd = esvigy.folder_dialog_cmd("/x'\"; evil")
+    assert cmd[0] == "/usr/bin/osascript" and "ESVIGY_START" in cmd[-1]
+    assert "evil" not in " ".join(cmd)
+
+
+def test_open_dialog_prefers_zenity_on_linux(tmp_path, monkeypatch):
+    zenity = fake_exe(tmp_path / "zenity")
+    fake_exe(tmp_path / "kdialog")
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert esvigy.folder_dialog_cmd("/x")[0] == str(zenity)
+
+
+def test_listing_dir_uses_forward_slashes(server):
+    (server.root / "sub" / "deep").mkdir(parents=True)
+    assert server.get_json("/api/list?dir=sub/deep")["dir"] == "sub/deep"
+
+
+# ---------------------------------------------------------------- finding Firefox
+
+def test_find_firefox_on_path(tmp_path, monkeypatch):
+    exe = fake_exe(tmp_path / "bin" / "firefox")
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
+    monkeypatch.setenv("PATH", str(exe.parent))
+    assert esvigy.find_firefox() == str(exe)
+
+
+def test_find_firefox_in_windows_program_files(tmp_path, monkeypatch):
+    exe = fake_exe(tmp_path / "Mozilla Firefox" / "firefox.exe")
+    monkeypatch.setattr(esvigy.sys, "platform", "win32")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    assert esvigy.find_firefox() == str(exe)
+
+
+def test_find_firefox_in_mac_user_applications(tmp_path, monkeypatch):
+    exe = fake_exe(tmp_path / "Applications" / "Firefox.app" / "Contents" / "MacOS" / "firefox")
+    monkeypatch.setattr(esvigy.sys, "platform", "darwin")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(esvigy.Path, "home", lambda: tmp_path)
+    assert esvigy.find_firefox() == str(exe)
+
+
+def test_find_firefox_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert esvigy.find_firefox() is None
 
 
 def test_post_elsewhere_is_not_found(server):
