@@ -170,18 +170,32 @@ body.no-side #side { display: none; }
 }
 .card .meta { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card .meta .date { display: none; }
-.card.pdf .pic::before {
-  content: "PDF";
+/* File type badge, coloured per format. */
+.card .pic::before {
+  content: attr(data-type);
   position: absolute;
   right: 4px; top: 4px;
   padding: 0 5px;
   border-radius: 4px;
-  background: #c62828;
-  color: #fff;
+  background: var(--badge, #616161);
+  color: var(--badge-text, #fff);
   font-size: 10px;
   font-weight: 700;
+  letter-spacing: .03em;
   z-index: 1;
 }
+.pic[data-type="SVG"], .pic[data-type="SVGZ"] { --badge: #f9a825; --badge-text: #1d1d22; }
+.pic[data-type="PDF"] { --badge: #c62828; }
+.pic[data-type="AI"] { --badge: #3a0b00; --badge-text: #ff9a00; }
+.pic[data-type="PNG"] { --badge: #2e7d32; }
+.pic[data-type="JPG"] { --badge: #1565c0; }
+.pic[data-type="GIF"] { --badge: #7b1fa2; }
+.pic[data-type="WEBP"] { --badge: #00838f; }
+.pic[data-type="AVIF"] { --badge: #ad1457; }
+.pic[data-type="TIFF"] { --badge: #e65100; }
+.pic[data-type="BMP"] { --badge: #6d4c41; }
+.pic[data-type="ICO"] { --badge: #455a64; }
+#main.table .card .pic::before { display: none; }  /* too small there; the name shows the type */
 .card .meta .size::before { content: " · "; }
 
 /* Table view: one row per file, full names, sortable columns. */

@@ -1,6 +1,7 @@
 # esvigy
 
-A fast SVG viewer for folders of (large) SVG files.
+A fast SVG viewer for folders of (large) SVG files. It also shows PDFs, Illustrator files,
+TIFFs and the common raster formats (PNG, JPEG, GIF, WebP, AVIF, BMP, ICO).
 
 Classic image viewers (xviewer, eog, …) render SVG with librsvg, which gets very
 slow on big files. Firefox's renderer is much faster, so esvigy uses Firefox as
@@ -41,7 +42,7 @@ with Cmd+Q (or press Ctrl+C in the terminal) to stop esvigy.
   folder you've seen before opens instantly
 - Viewer shows the cached thumbnail immediately, then swaps in the full render
 - Pan (drag), zoom at cursor (wheel), double-click toggles fit / 100 %
-- **Compare**: Ctrl-click two thumbnails and press *Compare* (or `c`), or press `c` in the viewer.
+- **Compare**: Ctrl-click (Cmd-click on macOS) two thumbnails and press *Compare* (or `c`), or press `c` in the viewer.
   Side by side or stacked (`l`), with pan/zoom linked between both (`y`). Each pane has its own ‹ › in its label; ←/→ step B,
   Shift+←/→ step A, and ↑/↓ or the top-bar ‹ › step both together. `c` goes back to a single file. The URL (`#file=a.svg&vs=b.svg`) is shareable.
 - Table view (`t`): full file names, dimensions, size and date; click a column header to sort, click again to reverse
@@ -51,6 +52,12 @@ with Cmd+Q (or press Ctrl+C in the terminal) to stop esvigy.
   been rendered (they are cached next to the thumbnail). PDF scripts never run in esvigy's viewer.
   Multi-page PDFs get a ‹ n / N › page bar; Page Up/Down turn pages (in compare mode on both
   sides; the page bars turn one side). The page is part of the URL (`&page=3`, `&vspage=2`).
+  Illustrator files (`.ai`) are shown the same way: since CS they are PDFs inside.
+- **Raster images**: PNG, JPEG, GIF, WebP, AVIF, BMP and ICO, decoded by Firefox itself (nothing
+  bundled). Their size comes from the file header (JPEG rotation from EXIF included).
+- **TIFF**: decoded by the bundled UTIF.js + pako (`static/vendor/utif`, MIT, about 80 KB) in a
+  worker, so big scans don't freeze the UI. Multi-page TIFFs get the same page bar as PDFs.
+- Each thumbnail carries a coloured badge with its file type (SVG, PDF, PNG, TIFF, …)
 - Natural sort, filter, sort by size/date, `.svgz` support
 - **Open…** (or `o`) picks another folder with the native dialog (zenity or kdialog on Linux; built in on macOS and Windows)
 - Back button / Esc returns to the grid; URL hash keeps folder and file
@@ -81,6 +88,11 @@ with Cmd+Q (or press Ctrl+C in the terminal) to stop esvigy.
 - PDFs opened via "raw ↗" are shown by the browser's own PDF viewer, which ignores the CSP. In the
   app window (default) Firefox's PDF scripting is switched off; with `-b firefox`/`default` your
   browser's own setting applies (in Firefox: `pdfjs.enableScripting` in `about:config`).
+- TIFFs are checked before the bundled UTIF.js decodes them (`static/tiffcheck.js`), because UTIF
+  believes every size a file claims: looping or out-of-file directories, pages over 300 MP
+  (about 1.2 GB decoded; A0 scanned at 600 dpi is more), oversized tiles or embedded JPEGs, and
+  compressed data that expands beyond the image are refused with a message instead of
+  freezing the browser or filling the memory.
 - Programs esvigy starts (Firefox, the folder dialog) are run by full path, found only in
   absolute `PATH` entries or their usual install locations, never in the current folder. On
   Windows only `.exe` files count, so a planted `firefox.bat` next to your files can't run.

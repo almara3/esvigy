@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -27,8 +28,14 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 CACHE_DIR = Path(os.environ.get("ESVIGY_CACHE")
                  or Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "esvigy" / "thumbs")
 SVG_EXTS = (".svg", ".svgz")
-PDF_EXTS = (".pdf",)
-DOC_EXTS = SVG_EXTS + PDF_EXTS
+# Illustrator files since CS (PDF-compatible, the default) are PDFs inside.
+PDF_EXTS = (".pdf", ".ai")
+# Raster formats Firefox decodes itself.
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+               ".webp": "image/webp", ".avif": "image/avif", ".bmp": "image/bmp", ".ico": "image/x-icon"}
+# TIFF is decoded by the bundled UTIF.js (static/tiffworker.js).
+TIFF_EXTS = (".tif", ".tiff")
+DOC_EXTS = SVG_EXTS + PDF_EXTS + tuple(IMAGE_TYPES) + TIFF_EXTS
 # PDFs can't be measured without a PDF parser. Until the browser has rendered one (and
 # stored its size in the cache), assume an A4 page.
 A4_PX = (793.701, 1122.52)
@@ -42,6 +49,7 @@ THUMB_NAME_RE = re.compile(r"[0-9a-f]{24}\.webp")
 META_NAME_RE = re.compile(r"[0-9a-f]{24}\.json")
 # SVG can carry scripts; never let it run anything when opened directly.
 SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox"
+# Raster images can't run anything; this is for PDFs and defence in depth.
 # PDFs are drawn by our bundled pdf.js (fetched as data, so this doesn't apply there). Opened
 # directly via "raw", Firefox's own viewer shows them; it ignores this CSP, so PDF scripting is
 # switched off in the app profile instead (see USER_JS).
@@ -120,6 +128,112 @@ def with_intrinsic_size(head, w, h):
     return head[:m.start()] + tag + head[m.end():]
 
 
+def tiff_tags(read):
+    """Numeric tags of a TIFF's first image directory, as {tag: first value}, or None.
+
+    `read(offset, n)` returns bytes of the TIFF data. TIFFs often keep the directory at the end
+    of the file, so it is read from wherever it is; EXIF blocks inside JPEGs are TIFFs too.
+    """
+    head = read(0, 8)
+    e = {b"II*\0": "<", b"MM\0*": ">"}.get(head[:4])
+    if not e:
+        return None
+    try:
+        (off,) = struct.unpack(e + "I", head[4:8])
+        (n,) = struct.unpack(e + "H", read(off, 2))
+        entries = read(off + 2, 12 * min(n, 1024))
+        tags = {}
+        for i in range(0, len(entries) - 11, 12):
+            tag, typ = struct.unpack(e + "HH", entries[i:i + 4])
+            if typ == 3:  # SHORT
+                tags[tag] = struct.unpack(e + "H", entries[i + 8:i + 10])[0]
+            elif typ == 4:  # LONG
+                tags[tag] = struct.unpack(e + "I", entries[i + 8:i + 12])[0]
+        return tags
+    except struct.error:
+        return None
+
+
+def jpeg_size(head):
+    """(w, h) of a JPEG as displayed, i.e. after its EXIF orientation, or None."""
+    i, orient, size = 2, 1, None
+    try:
+        while i + 4 <= len(head) and size is None:
+            if head[i] != 0xFF:
+                return None
+            marker = head[i + 1]
+            if marker == 0xFF:  # fill byte
+                i += 1
+                continue
+            (n,) = struct.unpack(">H", head[i + 2:i + 4])
+            seg = head[i + 4:i + 2 + n]
+            if marker == 0xE1 and seg[:6] == b"Exif\0\0":
+                tags = tiff_tags(lambda off, k, t=seg[6:]: t[off:off + k]) or {}
+                orient = tags.get(0x0112, 1)
+            elif 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):  # start of frame
+                h, w = struct.unpack(">HH", seg[1:5])
+                size = w, h
+            i += 2 + n
+    except struct.error:
+        return None
+    if size and 5 <= orient <= 8:  # rotated by 90°
+        size = size[::-1]
+    return size
+
+
+def image_size(path):
+    """(w, h) in px of a raster image, read from its header; None if not found.
+
+    AVIF rotation and anything this misses is corrected once the browser has decoded the
+    image (it stores the real size in the cache, which the listing prefers).
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(HEAD_BYTES)
+            if head[:4] in (b"II*\0", b"MM\0*"):
+                def read(off, n):
+                    f.seek(off)
+                    return f.read(n)
+                tags = tiff_tags(read) or {}
+                size = tags.get(256), tags.get(257)
+                return size if all(size) else None
+    except OSError:
+        return None
+    try:
+        if head[:8] == b"\x89PNG\r\n\x1a\n":
+            return struct.unpack(">II", head[16:24])
+        if head[:4] == b"GIF8":
+            return struct.unpack("<HH", head[6:10])
+        if head[:2] == b"\xff\xd8":
+            return jpeg_size(head)
+        if head[:2] == b"BM":
+            if struct.unpack("<I", head[14:18])[0] == 12:  # OS/2 header
+                return struct.unpack("<HH", head[18:22])
+            w, h = struct.unpack("<ii", head[18:26])
+            return w, abs(h)  # negative height: stored top-down
+        if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+            chunk = head[12:16]
+            if chunk == b"VP8 ":
+                w, h = struct.unpack("<HH", head[26:30])
+                return w & 0x3FFF, h & 0x3FFF
+            if chunk == b"VP8L":
+                (b,) = struct.unpack("<I", head[21:25])
+                return (b & 0x3FFF) + 1, (b >> 14 & 0x3FFF) + 1
+            if chunk == b"VP8X":
+                return (int.from_bytes(head[24:27], "little") + 1, int.from_bytes(head[27:30], "little") + 1)
+            return None
+        if head[:4] == b"\0\0\1\0":  # ICO: the biggest of its images; 0 means 256
+            (n,) = struct.unpack("<H", head[4:6])
+            sizes = [(head[6 + 16 * k] or 256, head[7 + 16 * k] or 256) for k in range(min(n, 64))]
+            return max(sizes, key=lambda s: s[0] * s[1]) if sizes else None
+        if head[4:8] == b"ftyp":  # AVIF: the image spatial extent ("ispe") property
+            k = head.find(b"ispe")
+            return struct.unpack(">II", head[k + 8:k + 16]) if k > 0 else None
+    except (struct.error, IndexError):
+        return None
+    return None
+
+
 def parse_meta(data):
     """Validate a document's metadata as sent by the browser; return a clean dict or None."""
     try:
@@ -137,6 +251,16 @@ def read_meta(key):
         return parse_meta((CACHE_DIR / f"{key}.json").read_bytes()[:MAX_META_BYTES])
     except OSError:
         return None
+
+
+def file_kind(name):
+    """How the UI draws a file: "svg", "pdf", "image" (natively) or "tiff" (with UTIF.js)."""
+    ext = os.path.splitext(name)[1].lower()
+    if ext in SVG_EXTS:
+        return "svg"
+    if ext in PDF_EXTS:
+        return "pdf"
+    return "tiff" if ext in TIFF_EXTS else "image"
 
 
 def thumb_key(path, st):
@@ -336,10 +460,21 @@ class Handler(BaseHTTPRequestHandler):
                     key = thumb_key(real, st)
                     f = {"name": e.name, "size": st.st_size, "mtime": st.st_mtime,
                          "key": key, "thumb": (CACHE_DIR / f"{key}.webp").exists()}
-                    if e.name.lower().endswith(PDF_EXTS):
+                    kind = file_kind(e.name)
+                    if kind == "pdf":
                         meta = read_meta(key)
                         w, h = (meta["w"], meta["h"]) if meta else A4_PX
                         f.update(kind="pdf", pages=meta and meta["pages"], intrinsic=True)
+                    elif kind != "svg":
+                        # The browser's measurement (rotation applied, TIFF page count) beats the header.
+                        meta = read_meta(key)
+                        size = (meta["w"], meta["h"]) if meta else image_size(real)
+                        if size and size[0] > 0 and size[1] > 0:
+                            w, h = size
+                            pages = meta["pages"] if meta else 1
+                        else:  # unknown until the browser has decoded it
+                            (w, h), pages = A4_PX, None
+                        f.update(kind=kind, pages=pages, intrinsic=True)
                     else:
                         w, h, intrinsic = svg_size(read_head(real))
                         f.update(kind="svg", intrinsic=intrinsic)
@@ -372,8 +507,8 @@ class Handler(BaseHTTPRequestHandler):
         p = self.resolve(self.server.root, rel)
         if p is None or not p.is_file() or not p.name.lower().endswith(DOC_EXTS):
             return self.fail(HTTPStatus.NOT_FOUND)
-        pdf = p.name.lower().endswith(PDF_EXTS)
-        fix = fix and not pdf
+        kind = file_kind(p.name)
+        fix = fix and kind == "svg"
         st = p.stat()
         etag = f'"{thumb_key(p, st)}{"f" if fix else ""}"'
         if self.headers.get("If-None-Match") == etag:
@@ -383,7 +518,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         gz = p.suffix.lower() == ".svgz"
-        headers = {"ETag": etag, "Cache-Control": "no-cache", "Content-Security-Policy": PDF_CSP if pdf else SVG_CSP}
+        headers = {"ETag": etag, "Cache-Control": "no-cache",
+                   "Content-Security-Policy": SVG_CSP if kind == "svg" else PDF_CSP}
         if gz:
             headers["Content-Encoding"] = "gzip"
 
@@ -397,7 +533,8 @@ class Handler(BaseHTTPRequestHandler):
 
         length = len(head) + st.st_size - skip
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "application/pdf" if pdf else "image/svg+xml")
+        ctype = {"svg": "image/svg+xml", "pdf": "application/pdf", "tiff": "image/tiff"}.get(kind)
+        self.send_header("Content-Type", ctype or IMAGE_TYPES[p.suffix.lower()])
         self.send_header("Content-Length", str(length))
         for k, v in headers.items():
             self.send_header(k, v)

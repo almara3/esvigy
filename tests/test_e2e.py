@@ -8,12 +8,14 @@ import json
 import re
 import shutil
 import threading
+import struct
 import time
+import zlib
 
 import pytest
 
 import esvigy
-from conftest import make_pdf, make_tree
+from conftest import make_bmp, make_jpeg_header, make_pdf, make_png, make_tiff, make_tree, tiff_bytes
 
 webdriver = pytest.importorskip("selenium.webdriver")
 from selenium.webdriver.common.action_chains import ActionChains  # noqa: E402
@@ -38,6 +40,11 @@ def app(tmp_path_factory):
     make_pdf(root / "docs" / "three.pdf", [(595, 842, (0, .6, 0)), (595, 842, (1, .8, 0)), (595, 842, (.8, 0, .8))])
     # too much for one drawing slice: guards against thumbnails that never finish
     make_pdf(root / "docs" / "heavy.pdf", [(595, 842, (1, 1, 1))], shapes=150_000)
+    (root / "pics").mkdir()
+    make_png(root / "pics" / "a.png", 300, 200, (0, 128, 0))
+    make_bmp(root / "pics" / "b.bmp", 30, 60, (0, 0, 255))
+    make_tiff(root / "pics" / "scan.tif", [(400, 200, (255, 0, 0)), (200, 400, (0, 0, 255))])
+    make_pdf(root / "pics" / "logo.ai", [(595, 842, (1, .5, 0))])
     old_cache, esvigy.CACHE_DIR = esvigy.CACHE_DIR, base / "cache"
     srv = esvigy.make_server(root)
     threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
@@ -405,3 +412,166 @@ def test_page_keys_step_files_without_multipage_pdf(ui):
     ui.wait(ui.viewer_open)
     ui.keys(Keys.PAGE_DOWN)
     ui.wait(lambda: ui.by_id("v-name").text == "b.svg")
+
+
+# ---------------------------------------------------------------- raster images, TIFF, AI
+
+def test_images_get_thumbnails_and_coloured_type_badges(ui):
+    ui.d.get(ui.url + "#dir=pics")
+    ui.wait(lambda: ui.card_names() == ["a.png", "b.bmp", "logo.ai", "scan.tif"])
+    ui.wait(lambda: ui.js("return [...document.querySelectorAll('.card img')].every(i => i.getAttribute('src'))"),
+            timeout=60)
+    assert not ui.d.find_elements(By.CSS_SELECTOR, ".card .note")  # no "cannot render"
+    badges = ui.js("""return [...document.querySelectorAll('.card .pic')].map(p => {
+        const s = getComputedStyle(p, '::before');
+        return [s.content, s.backgroundColor]; })""")
+    assert [b[0] for b in badges] == ['"PNG"', '"BMP"', '"AI"', '"TIFF"']
+    assert len({b[1] for b in badges}) == 4  # each format its own colour
+    # the TIFF's page count is known once it was decoded
+    dims = lambda: ui.js("return [...document.querySelectorAll('.card .dims')].map(e => e.textContent)")
+    ui.wait(lambda: dims() == ["300×200", "30×60", "793×1123 · 1 page", "400×200 · 2 pages"])
+
+
+def test_raster_image_viewer(ui):
+    ui.d.get(ui.url + "#dir=pics&file=a.png")
+    ui.wait(lambda: ui.by_id("v-time").text.endswith("ms"))
+    assert ui.by_id("v-info").text.startswith("300×200")
+    assert ui.js("return document.querySelector('.pane .img.ready').naturalWidth") == 300
+    assert pane_state(ui, 0)["aspect"] == pytest.approx(1.5, abs=0.02)
+
+
+def test_tiff_pages(ui):
+    ui.d.get(ui.url + "#dir=pics&file=scan.tif")
+    ui.wait(lambda: pane_state(ui, 0)["rgb"] == [255, 0, 0])
+    st = pane_state(ui, 0)
+    assert st["label"] == "1 / 2" and st["aspect"] > 1
+    ui.keys(Keys.PAGE_DOWN)
+    ui.wait(lambda: pane_state(ui, 0)["rgb"] == [0, 0, 255])
+    st = pane_state(ui, 0)
+    assert st["label"] == "2 / 2" and st["aspect"] < 1
+    ui.wheel(0, -100, times=4)  # redraws after zooming must not break the page
+    time.sleep(0.5)
+    assert pane_state(ui, 0)["rgb"] == [0, 0, 255]
+
+
+def test_illustrator_file_is_drawn_as_pdf(ui):
+    ui.d.get(ui.url + "#dir=pics&file=logo.ai")
+    ui.wait(lambda: ui.by_id("v-time").text.endswith("ms"))
+    assert pane_pixel(ui, 0.5, 0.5) == pytest.approx([255, 128, 0], abs=2)
+
+
+def test_compare_png_with_tiff(ui):
+    ui.d.get(ui.url + "#dir=pics&file=a.png&vs=scan.tif")
+    ui.wait(lambda: ui.visible_panes() == 2)
+    ui.wait(lambda: pane_state(ui, 1)["rgb"] == [255, 0, 0])
+    assert ui.js("return document.querySelector('.pane .img.ready') != null")
+
+
+
+# ---------------------------------------------------------------- hostile TIFFs
+# UTIF.js trusts every size a TIFF claims. tiffcheck.js and the guards in tiffworker.js must
+# refuse these before UTIF allocates. Each case is small enough that, without its guard, the
+# test fails (wrong outcome) instead of exhausting memory. The limit is lowered to 1 MP here.
+
+LIMIT = 1e6
+NIKON_LOOP = b"Nikon\0\2\0\0\0" + b"II*\0" + struct.pack("<IHI", 8, 0, 8)
+
+
+def put_tiff(ui, name, data):
+    (ui.root / "tiffsec").mkdir(exist_ok=True)
+    (ui.root / "tiffsec" / name).write_bytes(data)
+    return ui.url + "file/tiffsec/" + name
+
+
+def decode_tiff(ui, url, max_pixels=LIMIT):
+    """Decode a TIFF's first page in the real tiffworker.js: its size and centre pixel, or the error.
+
+    (Test scripts run in a sandbox that can't see the page's `const tiffDocs`, so this talks
+    to the worker directly, which is where all the limits are applied.)
+    """
+    ui.d.set_script_timeout(30)
+    return ui.d.execute_async_script("""
+        const [url, maxPixels, done] = arguments;
+        const w = new Worker("static/tiffworker.js");
+        const call = (msg) => new Promise((ok) => { w.onmessage = (e) => ok(e.data); w.postMessage(msg); });
+        (async () => {
+          const opened = await call({ id: 1, open: url, maxPixels });
+          if (opened.error) return opened;
+          const p = await call({ id: 2, page: 1 });
+          if (p.error) return p;
+          const px = new Uint8Array(p.rgba, (((p.h >> 1) * p.w) + (p.w >> 1)) * 4, 3);
+          return { size: [p.w, p.h], pixel: [...px] };
+        })().then((r) => { w.terminate(); done(r); });
+    """, url, max_pixels)
+
+
+def check_structure(ui, url):
+    """Run only tiffLimits.checkStructure (no UTIF): for files UTIF itself would never finish."""
+    ui.d.set_script_timeout(30)
+    return ui.d.execute_async_script("""
+        const [url, done] = arguments;
+        (async () => {
+          const src = await (await fetch("static/tiffcheck.js")).text();
+          const tiffLimits = new Function(src + "; return tiffLimits;")();
+          const buf = await (await fetch(url)).arrayBuffer();
+          try { tiffLimits.checkStructure(buf); return "ok"; }
+          catch (e) { return e.name + ": " + e.message; }
+        })().then(done);
+    """, url)
+
+
+def test_tiff_normal_files_still_decode(ui):
+    gray = tiff_bytes(300, 200, bytes([200]) * 60000)
+    assert decode_tiff(ui, put_tiff(ui, "gray.tif", gray)) == {"size": [300, 200], "pixel": [200, 200, 200]}
+    # Deflate goes through the guarded inflate
+    deflated = tiff_bytes(300, 200, zlib.compress(bytes([90]) * 60000), compression=8)
+    assert decode_tiff(ui, put_tiff(ui, "deflate.tif", deflated)) == {"size": [300, 200], "pixel": [90, 90, 90]}
+    assert check_structure(ui, put_tiff(ui, "gray.tif", gray)) == "ok"
+
+
+@pytest.mark.parametrize("name, data, expect", [
+    # claims 2 MP with 16 bytes of data
+    ("dims.tif", lambda: tiff_bytes(2000, 1000, b"\0" * 16), "image too large"),
+    # 0.5 MP, but 16 samples of 32 bits each: 32 MB of raw data
+    ("bits.tif", lambda: tiff_bytes(1000, 500, b"\0" * 16, bits=(32,) * 16), "image data too large"),
+    # a small image made of one 2000×2000 tile
+    ("tiles.tif", lambda: tiff_bytes(100, 100, b"\0" * 16, extra=[(322, 4, 1, 2000), (323, 4, 1, 2000)]),
+     "tiles too large"),
+    # 10 KB of pixels, but its Deflate strip expands to 20 MB
+    ("bomb.tif", lambda: tiff_bytes(100, 100, zlib.compress(b"\0" * 20_000_000, 9), compression=8), "expands"),
+    # a small image whose embedded JPEG claims 3000×3000
+    ("jpeg.tif", lambda: tiff_bytes(100, 100, make_jpeg_header(3000, 3000), compression=7), "embedded JPEG"),
+    ("ljpeg.tif", lambda: tiff_bytes(100, 100, make_jpeg_header(3000, 3000), compression=7, photometric=32803,
+                                     bits=(16,)), "embedded JPEG"),
+])
+def test_tiff_claims_are_refused_before_decoding(ui, name, data, expect):
+    r = decode_tiff(ui, put_tiff(ui, name, data()))
+    assert r.get("tooLarge") is True and expect in r["error"], r
+
+
+def test_tiff_tag_counts_past_the_end_are_refused(ui):
+    # 20 million SHORT values claimed in a 200-byte file; UTIF would loop over every one
+    data = tiff_bytes(10, 10, b"\0" * 100, extra=[(305, 3, 20_000_000, 8)])
+    r = decode_tiff(ui, put_tiff(ui, "count.tif", data))
+    assert "outside the file" in r.get("error", ""), r
+
+
+@pytest.mark.parametrize("name, data", [
+    ("loop.tif", lambda: tiff_bytes(10, 10, b"\0" * 100, next_ifd=8)),        # next directory: itself
+    ("subloop.tif", lambda: tiff_bytes(10, 10, b"\0" * 100, extra=[(330, 4, 1, 8)])),  # sub-image: itself
+    ("exifloop.tif", lambda: tiff_bytes(10, 10, b"\0" * 100, extra=[(34665, 4, 1, 8)])),
+    ("noteloop.tif", lambda: tiff_bytes(10, 10, b"\0" * 100, extra=[(37500, 7, 4, 8)])),  # maker note: itself
+    # a Nikon maker note is a TIFF of its own; this one is an empty directory whose "next" is itself
+    ("nikon.tif", lambda: tiff_bytes(10, 10, b"\0" * 100, extra=[(37500, 7, 24, NIKON_LOOP)])),
+])
+def test_tiff_directory_loops_are_refused(ui, name, data):
+    # Only the check runs: UTIF itself would never finish on these.
+    assert "loop" in check_structure(ui, put_tiff(ui, name, data()))
+
+
+def test_tiff_too_large_is_explained_in_the_viewer(ui):
+    # 400 MP claimed (default limit 300 MP) with almost no data: refused before anything is allocated
+    (ui.root / "tiffbig").mkdir(exist_ok=True)
+    (ui.root / "tiffbig" / "huge.tif").write_bytes(tiff_bytes(20000, 20000, b"\0" * 16))
+    ui.d.get(ui.url + "#dir=tiffbig&file=huge.tif")
+    ui.wait(lambda: "too large" in ui.js("return document.querySelector('.pane .load')?.textContent || ''"))

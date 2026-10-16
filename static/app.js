@@ -26,13 +26,23 @@ function fmtSize(n) {
 }
 const dateFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" });
 const fmtDate = (t) => dateFmt.format(t * 1000);
+// Short format label ("PNG", "PDF", …) from the extension; the grid colours badges by it.
+const TYPE_LABELS = { jpeg: "JPG", tif: "TIFF" };
+const fileType = (f) => {
+  const ext = f.name.slice(f.name.lastIndexOf(".") + 1).toLowerCase();
+  return TYPE_LABELS[ext] || ext.toUpperCase();
+};
+// PDFs and TIFFs can have pages; they are drawn into a canvas, one page at a time.
+const isPaged = (f) => f.kind === "pdf" || f.kind === "tiff";
+const docsFor = (f) => (f.kind === "tiff" ? tiffDocs : pdfDocs);
 const fmtDims = (f) => {
-  if (f.kind === "pdf" && !f.pages) return "PDF";  // size unknown until first rendered
+  if (f.pages === null) return fileType(f);  // size unknown until first rendered
   const d = Math.round(f.w) + "×" + Math.round(f.h);
-  return f.kind === "pdf" ? d + " · " + f.pages + (f.pages === 1 ? " page" : " pages") : d;
+  const pages = " · " + f.pages + (f.pages === 1 ? " page" : " pages");
+  return f.kind === "pdf" || f.pages > 1 ? d + pages : d;
 };
 
-// The browser measured a PDF (page size, page count): remember it and refresh the card.
+// The browser measured a file (size, page count): remember it and refresh the card.
 function updateMeta(f, meta) {
   if (!meta) return;
   Object.assign(f, meta);
@@ -242,6 +252,7 @@ function renderGrid() {
     const card = el("button", "card");
     card.dataset.i = i;
     const pic = el("div", "pic");
+    pic.dataset.type = fileType(f);
     const img = el("img");
     img.alt = "";
     img.decoding = "async";
@@ -252,7 +263,6 @@ function renderGrid() {
     card.append(pic, el("div", "name", f.name), meta);
     card.title = f.name;
     card.classList.toggle("sel", selected.includes(f));
-    card.classList.toggle("pdf", f.kind === "pdf");
     card._file = f;
     cards.set(f, card);
     frag.append(card);
@@ -450,7 +460,7 @@ class Pane {
     const keys = idx ? "←/→" : "Shift+←/→";
     this.cap.append(btn("‹", -1, `Previous file in this pane (${keys})`), this.info,
                     btn("›", 1, `Next file in this pane (${keys})`));
-    // Page bar for multi-page PDFs.
+    // Page bar for multi-page PDFs and TIFFs.
     this.pbar = el("div", "pbar");
     this.pPrev = el("button", null, "‹");
     this.pNext = el("button", null, "›");
@@ -460,7 +470,7 @@ class Pane {
     this.pPrev.addEventListener("click", () => pageStep(-1, this.idx));
     this.pNext.addEventListener("click", () => pageStep(1, this.idx));
     this.pbar.append(this.pPrev, this.pLabel, this.pNext);
-    this.canvas = el("canvas", "img");  // PDFs are drawn here instead of in `img`
+    this.canvas = el("canvas", "img");  // PDFs and TIFFs are drawn here instead of in `img`
     this.layer.append(this.thumb, this.img, this.canvas);
     this.stage.append(this.layer, this.load);
     this.el.append(this.stage, this.cap, this.pbar);
@@ -493,9 +503,9 @@ class Pane {
     this.load.hidden = false;
 
     this.canvas.classList.remove("ready");
-    const pdf = f.kind === "pdf";
-    this.img.hidden = pdf;
-    this.canvas.hidden = !pdf;
+    const paged = isPaged(f);
+    this.img.hidden = paged;
+    this.canvas.hidden = !paged;
 
     const done = () => {
       this.thumb.hidden = true;
@@ -507,14 +517,15 @@ class Pane {
     };
     const failed = (e) => {
       if (token !== this.token) return;
-      this.load.textContent = "⚠ cannot render this file";
+      this.load.textContent = "⚠ " + (e?.name === "TooLarge" ? e.message : "cannot render this file");
       console.warn("render failed", f.name, e);
     };
-    if (pdf) return this.openPdf(token, done).catch(failed);
+    if (paged) return this.openPdf(token, done).catch(failed);
 
     this.img.src = fileUrl(state.dir, f);
     this.img.decode().then(() => {
       if (token !== this.token) return;
+      if (f.kind === "image") this.fixSize(this.img.naturalWidth, this.img.naturalHeight, 1);
       // decode() resolves once parsed; wait two frames so the paint is included.
       requestAnimationFrame(() => requestAnimationFrame(() => {
         if (token !== this.token) return;
@@ -524,28 +535,39 @@ class Pane {
     }).catch(failed);
   }
 
-  // ---- PDF: pdf.js draws the current page into a canvas sized for the committed zoom.
+  // The listing may only have guessed the size (or page count); correct it once known.
+  fixSize(w, h, pages) {
+    const f = this.f;
+    if (Math.abs(w - f.w) <= 0.5 && Math.abs(h - f.h) <= 0.5 && pages === f.pages) return;
+    updateMeta(f, { w, h, pages });
+    this.info.querySelector("span").textContent = fmtDims(f) + " · " + fmtSize(f.size);
+    if (this === panes[0] && state.cmp < 0) $("v-info").textContent = fmtDims(f) + " · " + fmtSize(f.size);
+    if (isPaged(f)) return;  // showPage() sizes the layer
+    this.w = w;
+    this.h = h;
+    if (this.fitted) fitGroup(this);
+    else this.commit();
+  }
+
+  // ---- PDF and TIFF: the current page is drawn into a canvas sized for the committed zoom.
 
   async openPdf(token, done) {
     const f = this.f;
-    const doc = await pdfDocs.open(fileUrl(state.dir, f));
+    const docs = docsFor(f);
+    const doc = await docs.open(fileUrl(state.dir, f));
     if (token !== this.token) return doc.loadingTask.destroy();
     this.doc = doc;
+    this.docs = docs;
     this.pages = doc.numPages;
-    // The listing may only have guessed the size (of page 1); correct it.
     const first = await doc.getPage(1);
     if (token !== this.token) return;
-    const meta = { ...pdfDocs.size(first), pages: doc.numPages };
-    if (Math.abs(meta.w - f.w) > 0.5 || Math.abs(meta.h - f.h) > 0.5 || meta.pages !== f.pages) {
-      updateMeta(f, meta);
-      this.info.querySelector("span").textContent = fmtDims(f) + " · " + fmtSize(f.size);
-      if (this === panes[0] && state.cmp < 0) $("v-info").textContent = fmtDims(f) + " · " + fmtSize(f.size);
-    }
+    const { w, h } = docs.size(first);
+    this.fixSize(w, h, doc.numPages);
     await this.showPage(this.pageNo);
     if (token === this.token) done();
   }
 
-  // Go to page `n` of the open PDF (or remember it until the PDF is open).
+  // Go to page `n` of the open document (or remember it until it is open).
   setPage(n) {
     if (!this.doc) this.pageNo = n;
     else if (n !== this.pageNo) this.showPage(n).catch((e) => console.warn("page failed", e));
@@ -560,7 +582,7 @@ class Pane {
     if (token !== this.token || this.pageNo !== n) return;
     this.task?.cancel();
     this.page = page;
-    ({ w: this.w, h: this.h } = pdfDocs.size(page));  // pages can differ in size
+    ({ w: this.w, h: this.h } = this.docs.size(page));  // pages can differ in size
     this.canvas.classList.remove("ready");  // don't show the previous page stretched
     if (this.thumb.hidden) this.load.hidden = false;
     if (this.fitted) fitGroup(this);  // calls commit(), which draws
@@ -581,7 +603,7 @@ class Pane {
   drawPdf() {
     if (!this.page) return;
     this.task?.cancel();
-    const { canvas, task } = pdfDocs.draw(this.page, this.committed * devicePixelRatio);
+    const { canvas, task } = this.docs.draw(this.page, this.committed * devicePixelRatio);
     this.task = task;
     const token = this.token;
     this.drawing = task.promise.then(() => {
@@ -598,7 +620,7 @@ class Pane {
   closePdf() {
     this.task?.cancel();
     this.doc?.loadingTask.destroy();
-    this.task = this.doc = this.page = this.drawing = null;
+    this.task = this.doc = this.docs = this.page = this.drawing = null;
     this.pages = 0;
     this.updatePageBar();
     const blank = el("canvas", "img");
@@ -761,7 +783,7 @@ function openViewer(i, j = -1, page = 1, vspage = 1) {
 
 function prefetch(i) {
   const f = state.view[i];
-  if (!f || f.kind === "pdf" || f.size > 64 * 1024 * 1024) return;
+  if (!f || isPaged(f) || f.size > 64 * 1024 * 1024) return;
   const img = new Image();
   img.src = fileUrl(state.dir, f);
 }
