@@ -108,48 +108,71 @@ window at a time can use that profile.
 
 ## Benchmark
 
-How long does a big SVG take to get on screen at 1600×1200? librsvg is what xviewer, eog and most
-file-manager thumbnailers use; it is called here the same way they do (GdkPixbuf). Firefox is what
-esvigy uses (`<img>` + `decode()`, as in its viewer). Median of 3 runs.
+How long does a big SVG take to render at 1600×1200? librsvg is what xviewer, eog and most
+file-manager thumbnailers use; it is called here the same way they do (GdkPixbuf). resvg is a newer,
+standalone renderer (its command-line tool). Firefox is what esvigy uses; Chromium and WebKitGTK are
+what esvigy would get as an Electron app or in a system webview (pywebview, Tauri on Linux). The browsers
+draw the file into a canvas, as esvigy's thumbnail renderer does. All on the CPU, median of 3 runs,
+fastest in bold.
 
-| file | size | librsvg (eog, xviewer) | Firefox (esvigy) | speed-up |
-| --- | ---: | ---: | ---: | ---: |
-| filters-blur.svg (blur, mask, shadow) | 0.0 MB | 2.55 s | 0.24 s | 11× |
-| paths-3000.svg (3000 polylines) | 2.7 MB | 0.92 s | 0.29 s | 3× |
-| clipped-7000.svg (7000 clipped paths) | 5.3 MB | 2.37 s | 1.38 s | 2× |
-| scatter-250k.svg (250 000 circles) | 18.7 MB | 3.44 s | 3.59 s | 1× |
+| file | size | librsvg (eog, xviewer) | resvg | Firefox (esvigy) | Chromium | WebKitGTK |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| filters-blur.svg (blur, mask, shadow) | 0.0 MB | 2.31 s | 1.57 s | **0.23 s** | 0.32 s | 3.37 s |
+| paths-3000.svg (3000 polylines) | 2.7 MB | 0.89 s | 0.82 s | 0.32 s | 0.40 s | **0.17 s** |
+| clipped-7000.svg (7000 clipped paths) | 5.3 MB | 2.27 s | 6.79 s | 1.29 s | 1.70 s | **1.02 s** |
+| scatter-250k.svg (250 000 circles) | 18.7 MB | 3.20 s | **1.65 s** | 4.02 s | 5.60 s | 5.25 s |
+| real matplotlib figure (shaded `pcolormesh`) | 6.9 MB | 36.89 s | **0.47 s** | 0.52 s | 0.93 s | 0.71 s |
+| *slowest vs fastest* | | *78×* | *7×* | ***2.4×*** | *3.4×* | *15×* |
 
-The gain depends on what is in the file: big with filters, modest with many paths, none with
-a plain pile of circles. These generated files are not the worst case, though: a real 6.9 MB matplotlib
-figure (a shaded `pcolormesh`: about 3 600 gradients and 7 400 paths) took **35 s in librsvg and 0.56 s in
-Firefox**. I could not reproduce that with a generated file (not shared; it is private work data), so
-treat it as one data point rather than a typical result.
+No engine is the fastest everywhere, but Firefox has the smallest worst case: it is never more than
+2.4× behind the fastest engine on a file, and only on the plain pile of circles. Every other engine
+has a file type where it falls far behind: librsvg on the matplotlib figure (half a minute), resvg on
+filters and clipping, WebKitGTK on filters. The last row is a real 6.9 MB figure with about
+3 600 gradients and 7 400 paths. It is private work data, so it isn't shared, and I could not reproduce
+it with a generated file; treat it as one data point.
 
 Where esvigy helps beyond the raw render time: the render happens in a separate Firefox process, so the
-UI never freezes, and thumbnails are cached, so a folder you've seen before opens instantly.
+UI never freezes (WebKitGTK can't do this: it has no separate processes for frames), and thumbnails are
+cached, so a folder you've seen before opens instantly.
 
-Measured on an AMD Ryzen 5 5500U, Linux Mint 21.2, librsvg 2.52.5, Firefox 155 (headless).
+Measured on an AMD Ryzen 5 5500U, Linux Mint 21.2, librsvg 2.52.5, resvg 0.48.1, Firefox 155.0.1,
+Chromium 155 (Chrome for Testing), WebKitGTK 2.50.4; the browsers headless, WebKitGTK under Xvfb.
 Reproduce with:
 
     python3 benchmark/gen.py heavy /tmp/heavy
-    .venv/bin/python benchmark/bench.py /tmp/heavy   # needs the system python3 with PyGObject
+    .venv/bin/python benchmark/bench.py /tmp/heavy [your.svg ...]   # folders and/or files
+
+It needs the system python3 with PyGObject (librsvg, WebKitGTK), `resvg` on `PATH` (or `RESVG=/path/to/resvg`)
+and xvfb-run for WebKitGTK; selenium downloads Chrome for Testing if Chrome is missing. Engines that
+aren't available are skipped.
+
+While it runs, the browsers load the files from a small server on 127.0.0.1 that serves only the
+files being measured: no folder listing, no `index.html`, nothing else from their folders. So
+benchmarking `~/work/fig.svg` doesn't expose the rest of `~/work`.
 
 The screenshots above come from `.venv/bin/python docs/screenshots.py`.
 
 ## Tests
 
     python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-    .venv/bin/pytest                 # everything (~10 s)
-    .venv/bin/pytest -m "not e2e"    # no browser (~1 s)
+    .venv/bin/pytest                 # everything (~35 s)
+    .venv/bin/pytest -m "not e2e"    # no browser (~5 s)
 
 - `tests/test_svg.py`: SVG size parsing and header rewriting
 - `tests/test_server.py`: the HTTP server against a temp folder: listing, file serving,
   path-traversal/symlink/Host-header protection, thumbnail cache, the Open dialog (with a fake `zenity`)
+- `tests/test_pdf.py`: PDFs on the server: listing, serving, and validating the page-size metadata the browser sends
+- `tests/test_images.py`: raster images, TIFF and AI: sizes read from file headers (JPEG rotation included),
+  listing, content types
 - `tests/test_security.py`: one check per attack from the section above: missing/wrong token,
   cross-site writes, DNS rebinding, cache poisoning, malformed requests, escaping the root,
-  security headers, file permissions
-- `tests/test_e2e.py`: the UI in headless Firefox via Selenium (grid, viewer, compare, table view).
-  Also checks in a real browser that malicious SVGs and PDFs can't run scripts and that the CSP doesn't break the UI.
+  security headers, file permissions, programs planted in the current folder, Windows network paths
+- `tests/test_benchmark.py`: the benchmark's helper server serves only the measured files
+  (also with spaces, `#` or `?` in their names) and refuses everything else
+- `tests/test_e2e.py`: the UI in headless Firefox via Selenium (grid, viewer, compare, table view,
+  PDF and TIFF pages, raster images).
+  Also checks in a real browser that malicious SVGs and PDFs can't run scripts and that the CSP doesn't break the UI,
+  and that hostile TIFFs (looping directories, false sizes, decompression bombs) are refused before decoding.
   The browser gets the same preferences as esvigy's app profile.
   Skipped if Firefox or selenium is missing; geckodriver is downloaded on first run.
 
