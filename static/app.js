@@ -447,6 +447,7 @@ class Pane {
     this.thumb = el("img", "thumb");
     this.img = el("img", "img");
     this.thumb.alt = this.img.alt = "";
+    this.thumb.draggable = this.img.draggable = false;  // dragging pans; see bind()
     this.load = el("div", "load");
     // Label with the file name and this pane's own ‹ › (compare mode only).
     this.cap = el("div", "cap");
@@ -700,8 +701,12 @@ class Pane {
       const k = Math.exp(-e.deltaY * unit * 0.0015);
       targets(this).forEach((q) => q.zoomAt(k, e.clientX - r.left, e.clientY - r.top));
     }, { passive: false });
+    // Firefox would start its own "drag this image" on a mouse drag and cancel our pointer
+    // events; `draggable = false` isn't enough everywhere, so refuse every drag in the stage.
+    st.addEventListener("dragstart", (e) => e.preventDefault());
     st.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
+      e.preventDefault();  // no drag or text selection starting from here
       this.drag = { x: e.clientX, y: e.clientY };
       st.setPointerCapture(e.pointerId);
       st.classList.add("dragging");

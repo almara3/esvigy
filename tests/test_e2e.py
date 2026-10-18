@@ -684,3 +684,40 @@ def test_real_app_window_keeps_the_token_off_command_lines(tmp_path, monkeypatch
         srv.shutdown()
         srv.server_close()
         esvigy.CACHE_DIR = old_cache
+
+
+def layer_offset(ui, i=0):
+    """The (x, y) translation of visible pane `i`'s layer."""
+    return ui.js("""
+        const p = [...document.querySelectorAll('.pane')].filter(p => !p.hidden)[arguments[0]];
+        const m = new DOMMatrix(getComputedStyle(p.querySelector('.layer')).transform);
+        return [Math.round(m.e), Math.round(m.f)];
+    """, i)
+
+
+def test_drag_pans_the_image(ui):
+    # A real mouse drag on the image must pan it, not start the browser's "drag this image".
+    ui.card("a.svg").click()
+    ui.wait(lambda: ui.by_id("v-time").text.endswith("ms"))
+    ui.wheel(0, -100, times=6)  # zoom in, so the image covers the stage
+    ui.wait(lambda: "moving" not in ui.d.find_element(By.CSS_SELECTOR, ".pane .layer").get_attribute("class"))
+    x0, y0 = layer_offset(ui)
+    stage = ui.d.find_element(By.CSS_SELECTOR, ".pane .stage")
+    actions = ActionChains(ui.d).move_to_element(stage).click_and_hold()
+    for _ in range(6):
+        actions.move_by_offset(-25, -15)
+    actions.release().perform()
+    x1, y1 = layer_offset(ui)
+    assert (x0 - x1, y0 - y1) == (150, 90)
+
+
+def test_drag_in_compare_pans_both_when_linked(ui):
+    ui.d.get(ui.url + "#file=a.svg&vs=b.svg")
+    ui.wait(lambda: ui.visible_panes() == 2)
+    ui.wait(lambda: all(e.text.endswith("ms") for e in ui.d.find_elements(By.CSS_SELECTOR, ".pane .cap .ci span:last-child")))
+    before = [layer_offset(ui, 0), layer_offset(ui, 1)]
+    stage = ui.d.find_elements(By.CSS_SELECTOR, ".pane .stage")[0]
+    ActionChains(ui.d).move_to_element(stage).click_and_hold().move_by_offset(40, 30) \
+        .move_by_offset(40, 30).release().perform()
+    after = [layer_offset(ui, 0), layer_offset(ui, 1)]
+    assert [(a[0] - b[0], a[1] - b[1]) for a, b in zip(after, before)] == [(80, 60), (80, 60)]
