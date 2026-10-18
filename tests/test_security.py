@@ -409,3 +409,92 @@ def test_thumb_upload_survives_locked_target(server, monkeypatch):
     monkeypatch.setattr(esvigy.Path, "replace", locked)
     assert server.request("PUT", f"/thumb/{KEY}.webp", body=WEBP, headers=PUT_HEADERS).status == 204
     assert not [p for p in server.cache.iterdir() if p.name.startswith(".")]
+
+
+# ---------------------------------------------------------------- the token stays off command lines
+# Other users can read every process's command line (ps, /proc/<pid>/cmdline), so the browser is
+# started with the path of a private page that forwards it, never with the secret URL itself.
+
+@pytest.fixture
+def data_dir(tmp_path, monkeypatch):
+    d = tmp_path / "data"
+    monkeypatch.setattr(esvigy, "DATA_DIR", d)
+    monkeypatch.setattr(esvigy, "PROFILE_DIR", d / "firefox-profile")
+    return d
+
+
+def test_launch_page_is_private_and_forwards(data_dir):
+    import html
+    import re
+    url = "http://127.0.0.1:1234/SECRETtoken/#file=a%20b.svg&vs=x\"y.svg"
+    page = esvigy.launch_page(url)
+    assert "SECRET" not in str(page)
+    assert stat.S_IMODE(page.stat().st_mode) == 0o600
+    if sys.platform != "win32":
+        assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
+    target = re.search(r'http-equiv="refresh" content="0; url=([^"]*)"', page.read_text()).group(1)
+    assert html.unescape(target) == url  # quotes and & survive, nothing breaks out of the attribute
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_launch_page_never_writes_through_an_existing_file(data_dir, tmp_path, monkeypatch):
+    data_dir.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    monkeypatch.setattr(esvigy.secrets, "token_hex", lambda n: "fixed")
+    (data_dir / "open-fixed.html").symlink_to(victim)
+    with pytest.raises(FileExistsError):
+        esvigy.launch_page("http://127.0.0.1:1/t/")
+    assert victim.read_text() == "keep"
+
+
+def test_launch_page_is_deleted_once_the_browser_arrives(server, data_dir):
+    page = server.srv.launch_page = esvigy.launch_page(server.url)
+    assert server.request("GET", "/", auth=False).status == 403  # without the token: stays
+    assert page.exists()
+    assert server.request("GET", "/").status == 200
+    assert not page.exists() and server.srv.launch_page is None
+
+
+@pytest.mark.parametrize("browser, firefox, chromium", [
+    ("auto", "/fake/firefox", "/fake/chrome"), ("app", "/fake/firefox", None), ("firefox", "/fake/firefox", None),
+    ("auto", None, "/fake/chrome"), ("chromium", "/fake/firefox", "/fake/chrome"),  # Chromium app windows
+    ("auto", None, None), ("default", None, None), ("none", None, None)])
+def test_token_is_never_on_a_command_line(tree, cache, data_dir, monkeypatch, capsys, browser, firefox, chromium):
+    started, servers = [], []
+
+    class FakeProc:
+        def __init__(self, args, **kw):
+            started.append(list(args))
+
+        def wait(self, *a):
+            return 0
+
+        def poll(self):
+            return 0
+
+    real_make_server = esvigy.make_server
+
+    def make_server(*a, **k):
+        srv = real_make_server(*a, **k)
+        srv.serve_forever = lambda: None  # return at once instead of serving
+        servers.append(srv)
+        return srv
+
+    monkeypatch.setattr(esvigy, "make_server", make_server)
+    monkeypatch.setattr(esvigy, "find_firefox", lambda: firefox)
+    monkeypatch.setattr(esvigy, "find_chromium", lambda: chromium)
+    monkeypatch.setattr(esvigy.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(esvigy.webbrowser, "open", lambda url: started.append([url]))
+    monkeypatch.setattr(esvigy.sys, "argv", ["esvigy", str(tree / "a.svg"), "-b", browser])
+    esvigy.main()
+    servers[0].server_close()
+
+    token = servers[0].token
+    assert token in capsys.readouterr().out  # the terminal still shows the URL, for pasting
+    assert all(token not in arg for args in started for arg in args), started
+    if browser == "none":
+        assert started == []
+    else:
+        assert len(started) == 1 and started[0][-1].split("=", 1)[-1].startswith("file:")  # also --app=file:...
+    assert not list(data_dir.glob("open-*.html"))  # removed when esvigy quits

@@ -82,6 +82,10 @@ doesn't quit the browser, so quit it with Cmd+Q (or press Ctrl+C in the terminal
 - Every URL starts with a random secret (`http://127.0.0.1:PORT/<token>/`), new on each start.
   Other users on the machine and web pages that find the port get `403`. Treat the
   printed URL like a password; with `-b none`, don't paste it anywhere public.
+- The secret never goes on the browser's command line, which other users can read (`ps`).
+  The browser is started with the path of a private page (`~/.local/share/esvigy/open-*.html`,
+  readable only by you) that forwards it to the secret URL; the page is deleted as soon as the
+  browser has arrived.
 - Requests that change something (Open…, thumbnail upload) also need an `X-Esvigy` header,
   which other websites can't send. Uploaded thumbnails must be WebP.
 - SVGs are shown via `<img>`, so scripts inside them never run; opened directly ("raw ↗")

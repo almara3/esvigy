@@ -7,10 +7,13 @@ lookup as for its own window). Run only these with `pytest -m e2e`, or everythin
 
 import json
 import re
-import threading
+import shutil
 import struct
+import sys
+import threading
 import time
 import zlib
+from pathlib import Path
 
 import pytest
 
@@ -617,3 +620,62 @@ def test_tiff_too_large_is_explained_in_the_viewer(ui):
     (ui.root / "tiffbig" / "huge.tif").write_bytes(tiff_bytes(20000, 20000, b"\0" * 16))
     ui.d.get(ui.url + "#dir=tiffbig&file=huge.tif")
     ui.wait(lambda: "too large" in ui.js("return document.querySelector('.pane .load')?.textContent || ''"))
+
+
+# ---------------------------------------------------------------- launching the app window
+
+def firefox_tree(pid):
+    """pid and all its descendants (Firefox's content processes), from /proc."""
+    children = {}
+    for stat_file in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat_file.read_text().rsplit(")", 1)[1].split()
+        except OSError:
+            continue
+        children.setdefault(int(fields[1]), []).append(int(stat_file.parent.name))
+    out, todo = [], [pid]
+    while todo:
+        p = todo.pop()
+        out.append(p)
+        todo += children.get(p, [])
+    return out
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+@pytest.mark.parametrize("browser", ["app", "chromium"])
+def test_real_app_window_keeps_the_token_off_command_lines(tmp_path, monkeypatch, browser):
+    # Started the way main() does it: the browser gets the forwarding page's path, follows it to
+    # the secret URL, and the token appears in no command line of any of its processes.
+    mode, exe = esvigy.choose_browser(browser)
+    if mode != {"app": "firefox-app", "chromium": "chromium-app"}[browser]:
+        pytest.skip(f"no browser for -b {browser}")
+    monkeypatch.setattr(esvigy, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(esvigy, "PROFILE_DIR", tmp_path / "data" / "firefox-profile")
+    monkeypatch.setenv("MOZ_HEADLESS", "1")
+    real_popen = esvigy.subprocess.Popen  # Chromium has no headless environment variable: add the flag
+    monkeypatch.setattr(esvigy.subprocess, "Popen", lambda args, **kw: real_popen(
+        args[:1] + ["--headless=new"] + args[1:] if mode == "chromium-app" else args, **kw))
+    root = make_tree(tmp_path / "root")
+    old_cache, esvigy.CACHE_DIR = esvigy.CACHE_DIR, tmp_path / "cache"
+    srv = esvigy.make_server(root)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
+    page = srv.launch_page = esvigy.launch_page(srv.url)
+    proc, profile = esvigy.open_browser(page.as_uri(), mode, exe)
+    try:
+        assert proc is not None
+        deadline = time.time() + 60
+        while page.exists() and time.time() < deadline:  # deleted when the UI is requested with the token
+            time.sleep(0.1)
+        assert not page.exists(), "the browser never arrived at the UI"
+        cmdlines = {pid: Path(f"/proc/{pid}/cmdline").read_bytes() for pid in firefox_tree(proc.pid)
+                    if Path(f"/proc/{pid}/cmdline").exists()}
+        assert len(cmdlines) > 1  # the main process and at least one content process
+        assert not [pid for pid, c in cmdlines.items() if srv.token.encode() in c], cmdlines
+    finally:
+        proc.terminate()
+        proc.wait(20)
+        if profile:
+            shutil.rmtree(profile, ignore_errors=True)
+        srv.shutdown()
+        srv.server_close()
+        esvigy.CACHE_DIR = old_cache
