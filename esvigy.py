@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""esvigy - a fast SVG viewer that uses Firefox as its rendering engine.
+"""esvigy - a fast SVG viewer that uses Firefox (or else Chromium) as its rendering engine.
 
 Runs a tiny local HTTP server over a directory and opens the UI in the browser.
 Thumbnails are rendered once by the browser and cached on disk.
@@ -17,6 +17,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import webbrowser
 from http import HTTPStatus
@@ -51,8 +52,9 @@ META_NAME_RE = re.compile(r"[0-9a-f]{24}\.json")
 SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox"
 # Raster images can't run anything; this is for PDFs and defence in depth.
 # PDFs are drawn by our bundled pdf.js (fetched as data, so this doesn't apply there). Opened
-# directly via "raw", Firefox's own viewer shows them; it ignores this CSP, so PDF scripting is
-# switched off in the app profile instead (see USER_JS).
+# directly via "raw", the browser's own viewer would show them, and it ignores this CSP. Firefox's
+# app profile switches PDF scripting off (see USER_JS); every other browser gets them as a download
+# (server.pdf_inline), since there is no such switch elsewhere.
 PDF_CSP = "default-src 'none'"
 
 SVG_TAG_RE = re.compile(rb"<svg\b[^>]*>", re.S)
@@ -522,6 +524,9 @@ class Handler(BaseHTTPRequestHandler):
                    "Content-Security-Policy": SVG_CSP if kind == "svg" else PDF_CSP}
         if gz:
             headers["Content-Encoding"] = "gzip"
+        if kind == "pdf" and not self.server.pdf_inline:
+            # Only navigations obey this; pdf.js fetches the file and doesn't care.
+            headers["Content-Disposition"] = "attachment; filename*=UTF-8''" + quote(p.name)
 
         head, skip = b"", 0
         if fix and not gz:
@@ -614,6 +619,31 @@ def find_firefox():
     return next((str(p) for p in candidates if p.is_file()), None) or find_program("firefox")
 
 
+# Chromium-based browsers, in order of preference. Edge comes with Windows, so there is always one.
+CHROMIUM_PROGRAMS = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome",
+                     "microsoft-edge", "microsoft-edge-stable", "msedge", "brave-browser", "brave")
+CHROMIUM_MAC_APPS = ("Google Chrome", "Chromium", "Microsoft Edge", "Brave Browser")
+CHROMIUM_WIN_EXES = (("Google", "Chrome", "Application", "chrome.exe"),
+                     ("Chromium", "Application", "chrome.exe"),
+                     ("Microsoft", "Edge", "Application", "msedge.exe"),
+                     ("BraveSoftware", "Brave-Browser", "Application", "brave.exe"))
+
+
+def find_chromium():
+    """Full path of a Chromium-based browser (Chrome, Chromium, Edge, Brave), looked up like find_firefox()."""
+    if sys.platform == "darwin":
+        candidates = [Path(base) / f"{app}.app" / "Contents" / "MacOS" / app
+                      for app in CHROMIUM_MAC_APPS for base in ("/Applications", Path.home() / "Applications")]
+    elif sys.platform == "win32":
+        bases = [os.environ[var] for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")
+                 if os.path.isabs(os.environ.get(var, ""))]
+        candidates = [Path(base, *rel) for rel in CHROMIUM_WIN_EXES for base in bases]
+    else:
+        candidates = []
+    return (next((str(p) for p in candidates if p.is_file()), None)
+            or next(filter(None, map(find_program, CHROMIUM_PROGRAMS)), None))
+
+
 PROFILE_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "esvigy" / "firefox-profile"
 USER_JS = """\
 user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
@@ -643,25 +673,58 @@ def prepare_profile():
     (PROFILE_DIR / "chrome" / "userChrome.css").write_text(USER_CHROME_CSS)
 
 
-def open_browser(url, browser):
-    """Launch the UI. Returns the Firefox process in app mode (so we can quit with its window), else None."""
-    if browser == "none":
-        return None
-    exe = find_firefox() if browser in ("auto", "app", "firefox") else None
-    if exe and browser in ("auto", "app"):
+def chromium_profile():
+    """A new, private (0700) data folder for one Chromium app window, removed when esvigy quits.
+
+    A fresh one per run, not one kept like Firefox's: started with a folder that a running
+    Chromium already uses, Chromium hands the window over to it and exits at once, which would
+    look to us like the window was closed. Nothing in it is worth keeping (the URL changes every run).
+    """
+    return tempfile.mkdtemp(prefix="esvigy-chromium-")
+
+
+def choose_browser(browser):
+    """(mode, exe) for -b BROWSER. mode is "firefox-app", "chromium-app", "firefox", "default" or "none"."""
+    if browser in ("auto", "app"):
+        if exe := find_firefox():
+            return "firefox-app", exe
+        if exe := find_chromium():
+            return "chromium-app", exe
+        return "default", None
+    if browser == "chromium":
+        exe = find_chromium()
+        return ("chromium-app", exe) if exe else ("default", None)
+    if browser == "firefox":
+        exe = find_firefox()
+        return ("firefox", exe) if exe else ("default", None)
+    return browser, None
+
+
+def open_browser(url, mode, exe):
+    """Launch the UI. Returns (process, data folder to remove afterwards) for an app window, else (None, None)."""
+    if mode == "firefox-app":
         prepare_profile()
         args = [exe, "--no-remote", "--profile", str(PROFILE_DIR)]
         if sys.platform == "win32":
             args.append("--wait-for-browser")  # firefox.exe is a launcher that exits right away otherwise
         elif sys.platform != "darwin":
             args += ["--class", "esvigy", "--name", "esvigy"]  # X11/Wayland window class
-        return subprocess.Popen(args + ["--new-window", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if exe:
+        return subprocess.Popen(args + ["--new-window", url], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL), None
+    if mode == "chromium-app":
+        profile = chromium_profile()
+        # --app: a window without tabs, address bar or bookmarks (what userChrome.css does for Firefox).
+        args = [exe, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check"]
+        if sys.platform not in ("win32", "darwin"):
+            args.append("--class=esvigy")  # X11 window class
+        return subprocess.Popen(args + [f"--app={url}"], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL), profile
+    if mode == "firefox":
         subprocess.Popen([exe, "--new-window", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
-    else:
+    elif mode == "default":
         webbrowser.open(url)
-    return None
+    return None, None
 
 
 def make_server(root, port=0, verbose=False):
@@ -670,17 +733,21 @@ def make_server(root, port=0, verbose=False):
     server.root, server.verbose = Path(root).resolve(), verbose
     server.open_lock = threading.Lock()
     server.token = secrets.token_urlsafe(24)
+    server.pdf_inline = False  # True only for a browser that won't run PDF scripts (Firefox app profile)
     server.url = f"http://127.0.0.1:{server.server_port}/{server.token}/"
     return server
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Fast SVG viewer (renders with Firefox).")
+    ap = argparse.ArgumentParser(description="Fast SVG viewer (renders with Firefox, or else Chromium).")
     ap.add_argument("path", nargs="?", default=".", help="directory (or SVG file) to browse")
     ap.add_argument("-p", "--port", type=int, default=0, help="port to listen on (default: random)")
-    ap.add_argument("-b", "--browser", choices=("auto", "app", "firefox", "default", "none"), default="auto",
-                    help="app: own Firefox window without tabs/toolbars, quits with the window (auto = app if "
-                         "Firefox is installed); firefox: normal new window; default: system browser; none: only print the URL")
+    ap.add_argument("-b", "--browser", choices=("auto", "app", "chromium", "firefox", "default", "none"),
+                    default="auto",
+                    help="app (= auto): own window without tabs/toolbars that quits esvigy when closed, in Firefox "
+                         "if installed, else in Chrome/Chromium/Edge/Brave; chromium: that window in Chromium even "
+                         "if Firefox is there; firefox: normal new Firefox window; default: system browser; "
+                         "none: only print the URL")
     ap.add_argument("-v", "--verbose", action="store_true", help="log every request")
     args = ap.parse_args()
 
@@ -695,9 +762,12 @@ def main():
         url += "#file=" + quote(target.name)
 
     print(f"esvigy: serving {root}\n        {url}\n        close the window or Ctrl+C to quit", flush=True)
-    proc = open_browser(url, args.browser)
+    mode, exe = choose_browser(args.browser)
+    server.pdf_inline = mode == "firefox-app"
+    proc, profile = open_browser(url, mode, exe)
     if proc:
-        # Quit together with the window. With --no-remote and our own profile, the process lives exactly as long as it.
+        # Quit together with the window. With its own profile (Firefox: --no-remote), the browser
+        # process lives exactly as long as it.
         threading.Thread(target=lambda: (proc.wait(), server.shutdown()), daemon=True).start()
     try:
         server.serve_forever()
@@ -705,6 +775,14 @@ def main():
         print()
         if proc and proc.poll() is None:
             proc.terminate()
+    finally:
+        if profile:
+            if proc:
+                try:
+                    proc.wait(10)  # its files are still open until it has exited
+                except subprocess.TimeoutExpired:
+                    pass
+            shutil.rmtree(profile, ignore_errors=True)
 
 
 if __name__ == "__main__":

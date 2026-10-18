@@ -1,12 +1,12 @@
-"""Browser tests: drive the real UI in headless Firefox.
+"""Browser tests: drive the real UI in headless Firefox and headless Chromium.
 
-Skipped unless selenium is installed and Firefox is on PATH. Run only these with
-`pytest -m e2e`, or everything else with `pytest -m "not e2e"`.
+Each browser is skipped unless selenium is installed and esvigy finds the browser (the same
+lookup as for its own window). Run only these with `pytest -m e2e`, or everything else with
+`pytest -m "not e2e"`; `-k firefox` / `-k chromium` picks one browser.
 """
 
 import json
 import re
-import shutil
 import threading
 import struct
 import time
@@ -23,15 +23,39 @@ from selenium.webdriver.common.by import By  # noqa: E402
 from selenium.webdriver.common.keys import Keys  # noqa: E402
 from selenium.webdriver.support.ui import WebDriverWait  # noqa: E402
 
-pytestmark = [
-    pytest.mark.e2e,
-    pytest.mark.skipif(not shutil.which("firefox"), reason="Firefox not installed"),
-]
+pytestmark = pytest.mark.e2e
 
 
-@pytest.fixture(scope="module")
-def app(tmp_path_factory):
-    """One server and one browser for the whole module (starting Firefox is slow)."""
+def firefox_driver(downloads):
+    opts = webdriver.FirefoxOptions()
+    opts.add_argument("--headless")
+    opts.add_argument("--width=1300")
+    opts.add_argument("--height=800")
+    # Same preferences as esvigy's own app window, so security settings there are tested too.
+    for name, value in re.findall(r'^user_pref\("([^"]+)", (.+)\);$', esvigy.USER_JS, re.M):
+        opts.set_preference(name, json.loads(value))
+    return webdriver.Firefox(options=opts)
+
+
+def chromium_driver(downloads):
+    opts = webdriver.ChromeOptions()
+    opts.binary_location = esvigy.find_chromium()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--window-size=1300,800")
+    opts.add_experimental_option("prefs", {"download.default_directory": str(downloads),
+                                           "download.prompt_for_download": False})
+    return webdriver.Chrome(options=opts)
+
+
+BROWSERS = {"firefox": (esvigy.find_firefox, firefox_driver), "chromium": (esvigy.find_chromium, chromium_driver)}
+
+
+@pytest.fixture(scope="module", params=list(BROWSERS))
+def app(request, tmp_path_factory):
+    """One server and one browser for the whole module (starting a browser is slow), per browser."""
+    find, start = BROWSERS[request.param]
+    if not find():
+        pytest.skip(f"{request.param} not installed")
     base = tmp_path_factory.mktemp("e2e")
     root = make_tree(base / "root")
     (root / "docs").mkdir()
@@ -47,18 +71,13 @@ def app(tmp_path_factory):
     make_pdf(root / "pics" / "logo.ai", [(595, 842, (1, .5, 0))])
     old_cache, esvigy.CACHE_DIR = esvigy.CACHE_DIR, base / "cache"
     srv = esvigy.make_server(root)
+    srv.pdf_inline = request.param == "firefox"  # as esvigy sets it for its app windows
     threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True).start()
 
-    opts = webdriver.FirefoxOptions()
-    opts.add_argument("--headless")
-    opts.add_argument("--width=1300")
-    opts.add_argument("--height=800")
-    # Same preferences as esvigy's own app window, so security settings there are tested too.
-    for name, value in re.findall(r'^user_pref\("([^"]+)", (.+)\);$', esvigy.USER_JS, re.M):
-        opts.set_preference(name, json.loads(value))
-    driver = webdriver.Firefox(options=opts)
+    (base / "downloads").mkdir()
+    driver = start(base / "downloads")
     try:
-        yield driver, srv.url, root, base / "cache"
+        yield driver, srv.url, root, base / "cache", request.param, base / "downloads"
     finally:
         driver.quit()
         srv.shutdown()
@@ -69,19 +88,20 @@ def app(tmp_path_factory):
 @pytest.fixture
 def ui(app):
     """A fresh page with default preferences."""
-    driver, url, root, cache = app
+    driver, url, root, cache, browser, downloads = app
     driver.get(url)
     driver.execute_script("localStorage.clear()")
     driver.get("about:blank")  # a real reload; driver.refresh() can hang here
     driver.get(url)
-    ui = UI(driver, url, root, cache)
+    ui = UI(driver, url, root, cache, browser, downloads)
     ui.wait(lambda: ui.card_names())
     return ui
 
 
 class UI:
-    def __init__(self, driver, url, root, cache):
+    def __init__(self, driver, url, root, cache, browser, downloads):
         self.d, self.url, self.root, self.cache = driver, url, root, cache
+        self.browser, self.downloads = browser, downloads
 
     def wait(self, cond, timeout=20):
         return WebDriverWait(self.d, timeout).until(lambda _: cond())
@@ -247,10 +267,18 @@ def test_svg_scripts_never_run(ui):
 
 
 def test_pdf_scripts_never_run_when_opened_raw(ui):
-    # Firefox's own PDF viewer ignores our CSP; only the app profile's preference stops this.
+    # The browser's own PDF viewer ignores our CSP. In Firefox the app profile's preference stops
+    # PDF scripts; Chromium has no such switch, so there the PDF is downloaded instead of shown.
     from selenium.common.exceptions import NoAlertPresentException
     (ui.root / "evil").mkdir(exist_ok=True)
     make_pdf(ui.root / "evil" / "js.pdf", [(595, 842, (1, 1, 1))], js=b"app.alert('pwned-pdf');")
+    if ui.browser == "chromium":
+        ui.d.get(ui.url + "file/evil/js.pdf")
+        ui.wait(lambda: (ui.downloads / "js.pdf").is_file())
+        assert ui.js("return location.href").startswith(ui.url)  # still the UI, no viewer
+        with pytest.raises(NoAlertPresentException):
+            ui.d.switch_to.alert.dismiss()
+        return
     ui.d.get(ui.url + "file/evil/js.pdf")
     ui.wait(lambda: ui.js("return !!window.PDFViewerApplication?.pdfDocument"))
     ui.wait(lambda: ui.js("return document.querySelector('.page canvas') != null"))
@@ -511,10 +539,24 @@ def check_structure(ui, url):
     return ui.d.execute_async_script("""
         const [url, done] = arguments;
         (async () => {
-          const src = await (await fetch("static/tiffcheck.js")).text();
-          const tiffLimits = new Function(src + "; return tiffLimits;")();
+          let limits;
+          try {
+            const src = await (await fetch("static/tiffcheck.js")).text();
+            limits = new Function(src + "; return tiffLimits;")();
+          } catch (e) {
+            // Chromium applies the page's CSP (no eval) to test scripts too, but unlike Firefox it
+            // lets them see the page's globals: load the file as a normal page script instead.
+            if (typeof tiffLimits === "undefined") {
+              await new Promise((ok, fail) => {
+                const s = document.createElement("script");
+                s.src = "static/tiffcheck.js"; s.onload = ok; s.onerror = fail;
+                document.head.append(s);
+              });
+            }
+            limits = tiffLimits;
+          }
           const buf = await (await fetch(url)).arrayBuffer();
-          try { tiffLimits.checkStructure(buf); return "ok"; }
+          try { limits.checkStructure(buf); return "ok"; }
           catch (e) { return e.name + ": " + e.message; }
         })().then(done);
     """, url)

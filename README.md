@@ -6,7 +6,7 @@ TIFFs and the common raster formats (PNG, JPEG, GIF, WebP, AVIF, BMP, ICO).
 Classic image viewers (xviewer, eog, …) render SVG with librsvg, which gets very
 slow on big files. Firefox's renderer is much faster, so esvigy uses Firefox as
 its engine: a tiny local Python server (stdlib only) serves the folder, and the
-UI runs in a Firefox window.
+UI runs in a Firefox window. Without Firefox, it uses Chrome, Chromium, Edge or Brave instead.
 
 ![The thumbnail grid](docs/grid.png)
 
@@ -14,25 +14,27 @@ UI runs in a Firefox window.
 
 ## Usage
 
-    ./esvigy.py [DIR | FILE.svg]      # opens its own Firefox window
-    ./esvigy.py ~/drawings -b firefox # normal Firefox window instead of the app window
+    ./esvigy.py [DIR | FILE.svg]       # opens its own window: Firefox, else Chromium
+    ./esvigy.py ~/drawings -b chromium # own window in Chrome/Chromium/Edge/Brave even if Firefox is there
+    ./esvigy.py ~/drawings -b firefox  # normal Firefox window instead of the app window
     ./esvigy.py ~/drawings -b none    # just print the URL
     ./esvigy.py -h
 
 Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
 
-**Firefox is recommended.** esvigy is built and tested only with Firefox: its fast SVG
-renderer is the reason esvigy exists, and only the app window (Firefox's own profile)
-gets esvigy's security settings, such as no scripts in PDFs opened via "raw ↗".
-Other browsers (`-b default`) should work, but are slower on big SVGs and untested.
+**Firefox is preferred, Chromium works too.** esvigy is tested with both (the browser tests
+run in each). Firefox has the most even SVG speed (see the benchmark); Chromium is close on
+most files, but up to about 2× slower on huge piles of small shapes. Chromium is found as Google
+Chrome, Chromium, Microsoft Edge (part of Windows) or Brave. Other browsers (`-b default`) should
+work, but are untested.
 
 ### macOS and Windows
 
 esvigy is developed on Linux; macOS and Windows are supported but less tested. Python 3.9+
 is all you need. Run it as `python3 esvigy.py` (macOS) or `py esvigy.py` (Windows). Firefox
-is found in its usual install location (`/Applications`, `~/Applications`, `Program Files`)
-even when it isn't on `PATH`. On macOS, closing the window doesn't quit Firefox, so quit it
-with Cmd+Q (or press Ctrl+C in the terminal) to stop esvigy.
+and Chromium are found in their usual install locations (`/Applications`, `~/Applications`,
+`Program Files`, `AppData\Local`) even when they aren't on `PATH`. On macOS, closing the window
+doesn't quit the browser, so quit it with Cmd+Q (or press Ctrl+C in the terminal) to stop esvigy.
 
 ## Features
 
@@ -85,18 +87,20 @@ with Cmd+Q (or press Ctrl+C in the terminal) to stop esvigy.
 - SVGs are shown via `<img>`, so scripts inside them never run; opened directly ("raw ↗")
   they get a CSP sandbox that blocks scripts and external loads. The UI forbids inline
   scripts and being framed by other sites.
-- PDFs opened via "raw ↗" are shown by the browser's own PDF viewer, which ignores the CSP. In the
-  app window (default) Firefox's PDF scripting is switched off; with `-b firefox`/`default` your
-  browser's own setting applies (in Firefox: `pdfjs.enableScripting` in `about:config`).
+- PDFs and AI files opened via "raw ↗" would be shown by the browser's own PDF viewer, which ignores
+  the CSP. Only in Firefox's app window (the default with Firefox) is that viewer used, with PDF
+  scripting switched off. Everywhere else (Chromium, `-b firefox`, `-b default`, `-b none`) "raw ↗"
+  downloads them instead, since those viewers can't be told not to run scripts. esvigy's own viewer
+  is not affected: it never runs PDF scripts.
 - TIFFs are checked before the bundled UTIF.js decodes them (`static/tiffcheck.js`), because UTIF
   believes every size a file claims: looping or out-of-file directories, pages over 300 MP
   (about 1.2 GB decoded; A0 scanned at 600 dpi is more), oversized tiles or embedded JPEGs, and
   compressed data that expands beyond the image are refused with a message instead of
   freezing the browser or filling the memory.
-- Programs esvigy starts (Firefox, the folder dialog) are run by full path, found only in
+- Programs esvigy starts (the browser, the folder dialog) are run by full path, found only in
   absolute `PATH` entries or their usual install locations, never in the current folder. On
-  Windows only `.exe` files count, so a planted `firefox.bat` next to your files can't run.
-- Thumbnails (`~/.cache/esvigy/thumbs`) and the Firefox profile are created `0700`. Thumbnails
+  Windows only `.exe` files count, so a planted `firefox.bat` or `chrome.bat` next to your files can't run.
+- Thumbnails (`~/.cache/esvigy/thumbs`) and the browser profiles are created `0700`. Thumbnails
   are kept forever; delete the folder to clear them.
 
 ## Own window
@@ -105,6 +109,10 @@ By default esvigy opens Firefox in a dedicated profile (`~/.local/share/esvigy/f
 with the tab bar, address bar and bookmarks hidden, window class `esvigy` (Linux), and quits
 when you close the window. Your normal Firefox profile is untouched. Only one esvigy
 window at a time can use that profile.
+
+Without Firefox (or with `-b chromium`) the same kind of window opens in Chromium (`--app`), with
+a fresh profile in the temp folder that is deleted when esvigy quits. Your normal Chrome profile is
+untouched, and several esvigy windows can run at once.
 
 ## Benchmark
 
@@ -155,7 +163,7 @@ The screenshots above come from `.venv/bin/python docs/screenshots.py`.
 ## Tests
 
     python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-    .venv/bin/pytest                 # everything (~35 s)
+    .venv/bin/pytest                 # everything (~80 s with both browsers)
     .venv/bin/pytest -m "not e2e"    # no browser (~5 s)
 
 - `tests/test_svg.py`: SVG size parsing and header rewriting
@@ -169,11 +177,11 @@ The screenshots above come from `.venv/bin/python docs/screenshots.py`.
   security headers, file permissions, programs planted in the current folder, Windows network paths
 - `tests/test_benchmark.py`: the benchmark's helper server serves only the measured files
   (also with spaces, `#` or `?` in their names) and refuses everything else
-- `tests/test_e2e.py`: the UI in headless Firefox via Selenium (grid, viewer, compare, table view,
-  PDF and TIFF pages, raster images).
+- `tests/test_e2e.py`: the UI in headless Firefox and headless Chromium via Selenium (grid, viewer,
+  compare, table view, PDF and TIFF pages, raster images); `-k firefox` or `-k chromium` runs one.
   Also checks in a real browser that malicious SVGs and PDFs can't run scripts and that the CSP doesn't break the UI,
   and that hostile TIFFs (looping directories, false sizes, decompression bombs) are refused before decoding.
-  The browser gets the same preferences as esvigy's app profile.
-  Skipped if Firefox or selenium is missing; geckodriver is downloaded on first run.
+  Firefox gets the same preferences as esvigy's app profile.
+  Each browser is skipped if it (or selenium) is missing; geckodriver/chromedriver are downloaded on first run.
 
 Tests never touch your real thumbnail cache; it can also be redirected with `ESVIGY_CACHE=/some/dir`.

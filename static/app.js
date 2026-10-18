@@ -360,7 +360,7 @@ const thumbs = {
 };
 
 // Drawing a huge SVG blocks whatever thread does it, so it happens in a hidden iframe on
-// the *other* loopback hostname. That is a different origin, which Firefox puts in its own
+// the *other* loopback hostname. That is a different site, which Firefox and Chromium put in their own
 // process, so the UI keeps running while thumbnails are drawn.
 const renderer = {
   frame: null,

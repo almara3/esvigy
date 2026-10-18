@@ -1,6 +1,6 @@
 "use strict";
 // Hidden helper page. It is loaded in an iframe from a different origin than the UI
-// (localhost vs 127.0.0.1), so Firefox runs it in its own process: drawing a huge SVG
+// (localhost vs 127.0.0.1), so Firefox and Chromium run it in its own process: drawing a huge SVG
 // here cannot freeze the UI. Requests come in via postMessage, results go to the thumb cache.
 const PARENT = location.hostname === "localhost" ? location.origin.replace("localhost", "127.0.0.1")
                                                   : location.origin.replace("127.0.0.1", "localhost");

@@ -14,6 +14,7 @@ import threading
 import pytest
 
 import esvigy
+from conftest import make_pdf
 
 KEY = "0123456789abcdef01234567"
 WEBP = b"RIFF\x10\x00\x00\x00WEBPVP8 fake"
@@ -157,6 +158,29 @@ def test_app_profile_disables_pdf_scripting(tmp_path, monkeypatch):
     monkeypatch.setattr(esvigy, "PROFILE_DIR", tmp_path / "profile")
     esvigy.prepare_profile()
     assert 'user_pref("pdfjs.enableScripting", false);' in (tmp_path / "profile" / "user.js").read_text()
+
+
+@pytest.mark.parametrize("name", ["evil.pdf", "evil.ai"])
+def test_raw_pdfs_download_unless_firefox_app(server, name):
+    # Other browsers' PDF viewers can't be told not to run PDF scripts, and ignore the CSP.
+    make_pdf(server.root / name, [(595, 842, (1, 1, 1))], js=b"app.alert('pwned');")
+    r = server.request("GET", "/file/" + name)
+    assert r.status == 200 and r.headers["Content-Disposition"] == "attachment; filename*=UTF-8''" + name
+    server.srv.pdf_inline = True  # the Firefox app window, with pdfjs.enableScripting off
+    assert "Content-Disposition" not in server.request("GET", "/file/" + name).headers
+
+
+def test_svgs_are_never_downloads(server):
+    assert "Content-Disposition" not in server.request("GET", "/file/a.svg").headers
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_chromium_profile_is_private():
+    profile = esvigy.chromium_profile()
+    try:
+        assert stat.S_IMODE(os.stat(profile).st_mode) == 0o700
+    finally:
+        os.rmdir(profile)
 
 # ---------------------------------------------------------------- malformed requests
 # Each of these used to raise inside the handler instead of answering.
@@ -320,7 +344,8 @@ def plant(folder, *names):
 def test_programs_are_never_taken_from_the_current_directory(tmp_path, monkeypatch, platform):
     cwd = tmp_path / "Downloads"
     plant(cwd, "firefox", "firefox.exe", "firefox.bat", "firefox.cmd", "zenity", "zenity.exe", "zenity.bat",
-          "kdialog", "kdialog.exe", "powershell.exe", "powershell.bat", "osascript")
+          "kdialog", "kdialog.exe", "powershell.exe", "powershell.bat", "osascript",
+          "google-chrome", "chrome.exe", "chrome.bat", "msedge.exe", "msedge.cmd", "chromium")
     monkeypatch.chdir(cwd)
     monkeypatch.setattr(esvigy.sys, "platform", platform)
     monkeypatch.setattr(esvigy.Path, "home", lambda: tmp_path / "home")
@@ -329,6 +354,7 @@ def test_programs_are_never_taken_from_the_current_directory(tmp_path, monkeypat
     for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
         monkeypatch.setenv(var, ".")
     assert esvigy.find_firefox() is None
+    assert esvigy.find_chromium() is None
     assert esvigy.find_program("zenity") is None
     cmd = esvigy.folder_dialog_cmd(tmp_path)
     if platform != "darwin":  # macOS uses the fixed /usr/bin/osascript

@@ -305,5 +305,55 @@ def test_find_firefox_missing(tmp_path, monkeypatch):
     assert esvigy.find_firefox() is None
 
 
+# ---------------------------------------------------------------- finding Chromium
+
+def test_find_chromium_prefers_chrome_on_path(tmp_path, monkeypatch):
+    fake_exe(tmp_path / "bin" / "chromium")
+    exe = fake_exe(tmp_path / "bin" / "google-chrome")
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
+    monkeypatch.setenv("PATH", str(exe.parent))
+    assert esvigy.find_chromium() == str(exe)
+
+
+def test_find_chromium_finds_edge_on_windows(tmp_path, monkeypatch):
+    exe = fake_exe(tmp_path / "Microsoft" / "Edge" / "Application" / "msedge.exe")
+    monkeypatch.setattr(esvigy.sys, "platform", "win32")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path))
+    assert esvigy.find_chromium() == str(exe)
+
+
+def test_find_chromium_in_mac_applications(tmp_path, monkeypatch):
+    exe = fake_exe(tmp_path / "Applications" / "Chromium.app" / "Contents" / "MacOS" / "Chromium")
+    monkeypatch.setattr(esvigy.sys, "platform", "darwin")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(esvigy.Path, "home", lambda: tmp_path)
+    assert esvigy.find_chromium() == str(exe)
+
+
+def test_find_chromium_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert esvigy.find_chromium() is None
+
+
+@pytest.mark.parametrize("browser, firefox, chromium, expect", [
+    ("auto", True, True, "firefox-app"),       # Firefox is preferred
+    ("auto", False, True, "chromium-app"),
+    ("auto", False, False, "default"),
+    ("app", False, True, "chromium-app"),
+    ("chromium", True, True, "chromium-app"),
+    ("chromium", True, False, "default"),
+    ("firefox", False, True, "default"),
+    ("none", True, True, "none"),
+])
+def test_choose_browser(monkeypatch, browser, firefox, chromium, expect):
+    monkeypatch.setattr(esvigy, "find_firefox", lambda: "/x/firefox" if firefox else None)
+    monkeypatch.setattr(esvigy, "find_chromium", lambda: "/x/chrome" if chromium else None)
+    assert esvigy.choose_browser(browser)[0] == expect
+
+
 def test_post_elsewhere_is_not_found(server):
     assert server.request("POST", "/api/list", headers={"X-Esvigy": "1"}).status == 404
