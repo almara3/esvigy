@@ -833,26 +833,22 @@ function pageKey(d) {
 }
 
 // Step which file is shown. In compare mode `which` picks pane 0 (A), 1 (B) or "both";
-// moving both keeps their distance, so they can't land on the same file.
+// both may show the same file, e.g. to compare two parts of one figure.
 function step(d, which = 0) {
   const n = state.view.length;
   if (!n) return;
   if (state.cmp < 0) return go((state.current + d + n) % n, -1);
   if (which === "both") return go((state.current + d + n) % n, (state.cmp + d + n) % n);
-  let a = state.current, b = state.cmp;
-  const other = which ? a : b;
-  let i = which ? b : a;
-  do { i = (i + d + n) % n; } while (i === other && n > 1);
-  which ? (b = i) : (a = i);
-  go(a, b);
+  const a = state.current, b = state.cmp;
+  if (which) go(a, (b + d + n) % n);
+  else go((a + d + n) % n, b);
 }
 
 function toggleCompare() {
   const n = state.view.length;
   if (state.current < 0) return;
   if (state.cmp >= 0) return go(state.current, -1);
-  if (n < 2) return;
-  go(state.current, (state.current + 1) % n);
+  go(state.current, (state.current + 1) % n);  // the only file in a folder: compared with itself
 }
 
 function setLayout(l) {

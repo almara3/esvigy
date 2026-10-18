@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 import esvigy
-from conftest import make_bmp, make_jpeg_header, make_pdf, make_png, make_tiff, make_tree, tiff_bytes
+from conftest import SMALL, make_bmp, make_jpeg_header, make_pdf, make_png, make_tiff, make_tree, tiff_bytes
 
 webdriver = pytest.importorskip("selenium.webdriver")
 from selenium.webdriver.common.action_chains import ActionChains  # noqa: E402
@@ -67,6 +67,8 @@ def app(request, tmp_path_factory):
     base = tmp_path_factory.mktemp("e2e")
     root = make_tree(base / "root")
     (root / "docs").mkdir()
+    (root / "single").mkdir()
+    (root / "single" / "only.svg").write_text(SMALL.format(w=120, h=80, c="navy"))
     make_pdf(root / "docs" / "a4.pdf", [(595, 842, (0, .5, .5))])
     make_pdf(root / "docs" / "two.pdf", [(842, 595, (.8, .1, .1)), (595, 842, (0, 0, 1))])
     make_pdf(root / "docs" / "three.pdf", [(595, 842, (0, .6, 0)), (595, 842, (1, .8, 0)), (595, 842, (.8, 0, .8))])
@@ -370,19 +372,19 @@ def test_compare_step_each_pane_or_both(ui):
     cap_button = lambda pane, i: ui.d.find_elements(By.CSS_SELECTOR, ".pane")[pane] \
         .find_elements(By.CSS_SELECTOR, ".cap button")[i]
 
-    cap_button(0, 1).click()  # A: next, skipping the file B shows
-    ui.wait(lambda: name() == "viewbox-only.svg ⇄ b.svg")
+    cap_button(0, 1).click()  # A: next, onto the file B shows (same figure on both sides is fine)
+    ui.wait(lambda: name() == "b.svg ⇄ b.svg")
     cap_button(1, 0).click()  # B: previous
-    ui.wait(lambda: name() == "viewbox-only.svg ⇄ a.svg")
+    ui.wait(lambda: name() == "b.svg ⇄ a.svg")
 
-    ui.by_id("v-next").click()  # top bar: both panes, wrapping around
-    ui.wait(lambda: name() == "a.svg ⇄ b.svg")
-    ui.keys(Keys.ARROW_DOWN)  # both
-    ui.wait(lambda: name() == "b.svg ⇄ viewbox-only.svg")
-    ui.keys(Keys.ARROW_UP)
-    ui.wait(lambda: name() == "a.svg ⇄ b.svg")
-    ui.keys(Keys.ARROW_RIGHT)  # unchanged: B only
+    ui.by_id("v-next").click()  # top bar: both panes
+    ui.wait(lambda: name() == "viewbox-only.svg ⇄ b.svg")
+    ui.keys(Keys.ARROW_DOWN)  # both, wrapping around
     ui.wait(lambda: name() == "a.svg ⇄ viewbox-only.svg")
+    ui.keys(Keys.ARROW_UP)
+    ui.wait(lambda: name() == "viewbox-only.svg ⇄ b.svg")
+    ui.keys(Keys.ARROW_RIGHT)  # unchanged: B only
+    ui.wait(lambda: name() == "viewbox-only.svg ⇄ viewbox-only.svg")
 
 
 def pane_state(ui, i):
@@ -722,3 +724,25 @@ def test_drag_in_compare_pans_both_when_linked(ui):
         .move_by_offset(40, 30).release().perform()
     after = [layer_offset(ui, 0), layer_offset(ui, 1)]
     assert [(a[0] - b[0], a[1] - b[1]) for a, b in zip(after, before)] == [(80, 60), (80, 60)]
+
+
+def test_compare_two_parts_of_the_same_figure(ui):
+    # Same file on both sides; unlinked, each side zooms (and pans) on its own.
+    ui.d.get(ui.url + "#file=a.svg&vs=a.svg")
+    ui.wait(lambda: ui.visible_panes() == 2)
+    assert ui.by_id("v-name").text == "a.svg ⇄ a.svg"
+    ui.wait(lambda: all(e.text.endswith("ms") for e in ui.d.find_elements(By.CSS_SELECTOR, ".pane .cap .ci span:last-child")))
+    if "on" in ui.by_id("v-link").get_attribute("class"):
+        ui.by_id("v-link").click()
+    ui.wheel(1, -100, times=4)
+    ui.wait(lambda: "|" in ui.by_id("v-zoom").text)  # two different zoom levels
+
+
+def test_compare_in_a_folder_with_one_file(ui):
+    ui.d.get(ui.url + "#dir=single")
+    ui.wait(lambda: ui.card_names() == ["only.svg"])
+    ui.card("only.svg").click()
+    ui.wait(ui.viewer_open)
+    ui.keys("c")
+    ui.wait(lambda: ui.visible_panes() == 2)
+    assert ui.by_id("v-name").text == "only.svg ⇄ only.svg"

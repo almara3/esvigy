@@ -46,7 +46,8 @@ doesn't quit the browser, so quit it with Cmd+Q (or press Ctrl+C in the terminal
 - Pan (drag), zoom at cursor (wheel), double-click toggles fit / 100 %
 - **Compare**: Ctrl-click (Cmd-click on macOS) two thumbnails and press *Compare* (or `c`), or press `c` in the viewer.
   Side by side or stacked (`l`), with pan/zoom linked between both (`y`). Each pane has its own ‹ › in its label; ←/→ step B,
-  Shift+←/→ step A, and ↑/↓ or the top-bar ‹ › step both together. `c` goes back to a single file. The URL (`#file=a.svg&vs=b.svg`) is shareable.
+  Shift+←/→ step A, and ↑/↓ or the top-bar ‹ › step both together. Both sides may show the same file, e.g. two
+  parts of one figure (unlink with `y` to zoom them separately). `c` goes back to a single file. The URL (`#file=a.svg&vs=b.svg`) is shareable.
 - Table view (`t`): full file names, dimensions, size and date; click a column header to sort, click again to reverse
 - File names get two lines in the grid (full name on hover)
 - **PDF**: drawn by the bundled pdf.js (`static/vendor/pdfjs`, Mozilla, Apache-2.0),
