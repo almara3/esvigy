@@ -9,6 +9,7 @@ import argparse
 import gzip
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
@@ -347,6 +348,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
         if path in ("/", "/index.html"):
+            if self.server.launch_page:  # the browser has arrived: the forwarding page is done
+                self.server.launch_page.unlink(missing_ok=True)
+                self.server.launch_page = None
             return self.serve_static("index.html")
         if path.startswith("/static/"):
             return self.serve_static(path[len("/static/"):])
@@ -614,7 +618,8 @@ def find_firefox():
     return next((str(p) for p in candidates if p.is_file()), None) or find_program("firefox")
 
 
-PROFILE_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "esvigy" / "firefox-profile"
+DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "esvigy"
+PROFILE_DIR = DATA_DIR / "firefox-profile"
 USER_JS = """\
 user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
 user_pref("browser.tabs.inTitlebar", 0);
@@ -641,6 +646,27 @@ def prepare_profile():
     (PROFILE_DIR / "chrome").mkdir(exist_ok=True)
     (PROFILE_DIR / "user.js").write_text(USER_JS)
     (PROFILE_DIR / "chrome" / "userChrome.css").write_text(USER_CHROME_CSS)
+
+
+def launch_page(url):
+    """Write a private page that forwards the browser to `url`; return its path.
+
+    The secret URL must never go on a browser's command line: other users on the machine can
+    read command lines (ps, /proc/<pid>/cmdline), and an app window keeps its own for as long as
+    it is open. The browser gets this page's path instead, which gives nothing away; the page
+    itself is readable only by us. The server deletes it as soon as the browser has arrived
+    (Handler.do_GET), main() when esvigy quits at the latest.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.chmod(0o700)
+    page = DATA_DIR / f"open-{secrets.token_hex(8)}.html"
+    # O_EXCL | O_NOFOLLOW: never write through a file or symlink someone put there.
+    fd = os.open(page, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    u = html.escape(url, quote=True)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(f'<!doctype html>\n<meta charset="utf-8">\n<title>esvigy</title>\n'
+                f'<meta http-equiv="refresh" content="0; url={u}">\n<p><a href="{u}">Open esvigy</a></p>\n')
+    return page
 
 
 def open_browser(url, browser):
@@ -671,6 +697,7 @@ def make_server(root, port=0, verbose=False):
     server.open_lock = threading.Lock()
     server.token = secrets.token_urlsafe(24)
     server.url = f"http://127.0.0.1:{server.server_port}/{server.token}/"
+    server.launch_page = None  # set by main(): the page that forwards the browser to server.url
     return server
 
 
@@ -695,7 +722,9 @@ def main():
         url += "#file=" + quote(target.name)
 
     print(f"esvigy: serving {root}\n        {url}\n        close the window or Ctrl+C to quit", flush=True)
-    proc = open_browser(url, args.browser)
+    # The browser is pointed at a private page that forwards it, never at the secret URL itself.
+    page = server.launch_page = launch_page(url) if args.browser != "none" else None
+    proc = open_browser(page.as_uri(), args.browser) if page else None
     if proc:
         # Quit together with the window. With --no-remote and our own profile, the process lives exactly as long as it.
         threading.Thread(target=lambda: (proc.wait(), server.shutdown()), daemon=True).start()
@@ -705,6 +734,9 @@ def main():
         print()
         if proc and proc.poll() is None:
             proc.terminate()
+    finally:
+        if page:
+            page.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
