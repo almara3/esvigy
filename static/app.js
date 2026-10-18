@@ -174,6 +174,83 @@ async function revealInTree(dir) {
   }
 }
 
+// ---------------------------------------------------------------- files in the sidebar
+// The current folder's files, one line each with a tiny thumbnail, listed under its tree node
+// (after its subfolders, in their own list, so loading subfolders can't wipe them).
+
+const sideRows = new Map(); // file object -> row
+let sideList = null;
+
+const sideObserver = new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    const mini = e.target.querySelector(".mini");
+    if (e.isIntersecting && e.target._file.thumb && !mini.hasAttribute("src")) mini.src = thumbUrl(e.target._file);
+  }
+}, { root: $("tree"), rootMargin: "200px 0px" });
+
+function renderSideFiles() {
+  sideList?.remove();
+  sideList = null;
+  sideRows.clear();
+  sideObserver.disconnect();
+  const node = treeNodes.get(state.dir);
+  if (!node) return;  // revealInTree() calls again once the node exists
+  const ul = el("ul", "files");
+  for (const f of state.view) {
+    const row = el("div", "row file");
+    const mini = el("img", "mini");
+    mini.alt = "";
+    mini.decoding = "async";
+    row.append(el("span", "twisty"), mini, el("span", "label", f.name), el("span", "ab"));
+    row._file = f;
+    const li = el("li");
+    li.append(row);
+    ul.append(li);
+    sideRows.set(f, row);
+  }
+  node.li.append(ul);
+  sideList = ul;
+  for (const row of sideRows.values()) sideObserver.observe(row);
+  markSideFiles(false);
+}
+
+// A thumbnail was just made for `f` (the grid does that): show it in the sidebar too.
+function setSideThumb(f, src) {
+  const mini = sideRows.get(f)?.querySelector(".mini");
+  if (mini) mini.src = src;
+}
+
+// Highlight the file(s) open in the viewer; in compare mode mark which side shows which.
+function markSideFiles(scroll = true) {
+  const a = viewer.hidden ? null : state.view[state.current];
+  const b = viewer.hidden || state.cmp < 0 ? null : state.view[state.cmp];
+  for (const [f, row] of sideRows) {
+    row.classList.toggle("cur", f === a || f === b);
+    row.querySelector(".ab").textContent = b ? [f === a && "A", f === b && "B"].filter(Boolean).join(" ") : "";
+  }
+  if (scroll && a) sideRows.get(b ?? a)?.scrollIntoView({ block: "nearest" });
+}
+
+$("tree").addEventListener("mouseover", (e) => {  // full name on hover, with what's known by now
+  const row = e.target.closest(".row.file");
+  if (row) row.title = row._file.name + "\n" + fmtDims(row._file) + " · " + fmtSize(row._file.size);
+});
+
+$("tree").addEventListener("click", (e) => {
+  const row = e.target.closest(".row.file");
+  if (!row) return;
+  const i = state.view.indexOf(row._file);
+  if (i < 0) return;
+  if (state.cmp >= 0 && !viewer.hidden) {
+    // compare: click shows the file on side B, Shift+click on side A; the other side keeps its page
+    const [pa, pb] = [panes[0].pageNo, panes[1].pageNo];
+    return e.shiftKey ? go(i, state.cmp, 1, pb) : go(state.current, i, pa, 1);
+  }
+  if (!viewer.hidden) return go(i, -1);  // like stepping: no new history entry
+  state.openedByPush = true;
+  writeHash(state.dir, row._file.name, true);
+});
+
 // ---------------------------------------------------------------- grid
 
 const grid = $("grid");
@@ -197,7 +274,7 @@ async function loadDir(dir) {
     $("tree").append(ul);
     document.title = "esvigy — " + data.root;
   }
-  revealInTree(dir);
+  revealInTree(dir).then(() => { if (state.dir === dir) renderSideFiles(); });
   renderCrumbs(dir, data.root);
   state.files = data.files;
   sortFiles();
@@ -272,6 +349,7 @@ function renderGrid() {
   for (const c of cards.values()) observer.observe(c);
   $("empty").hidden = state.view.length > 0;
   updateStatus();
+  renderSideFiles();
 }
 
 // Ctrl/Cmd-click selects up to two files to compare; a plain click opens one.
@@ -405,7 +483,9 @@ async function renderThumb(f, dir, gen) {
     if (r.error) throw new Error(r.error);
     if (r.cached) f.thumb = true;
     const img = cards.get(f)?.querySelector("img");
-    if (img && gen === thumbs.generation) img.src = r.cached ? thumbUrl(f) : URL.createObjectURL(r.blob);
+    const src = r.cached ? thumbUrl(f) : URL.createObjectURL(r.blob);
+    if (img && gen === thumbs.generation) img.src = src;
+    setSideThumb(f, src);
   } catch (e) {
     const pic = cards.get(f)?.querySelector(".pic");
     if (pic && !pic.querySelector(".note")) pic.append(el("span", "note", "⚠ cannot render"));
@@ -784,6 +864,7 @@ function openViewer(i, j = -1, page = 1, vspage = 1) {
   $("v-cmp").classList.toggle("on", compare);
   $("v-link").classList.toggle("on", cmp.link);
   showZoom();
+  markSideFiles();
 }
 
 function prefetch(i) {
@@ -801,6 +882,7 @@ function closeViewer() {
   state.current = state.cmp = -1;
   state.openedByPush = false;
   thumbs.pause(false);
+  markSideFiles(false);
   const card = f && cards.get(f);
   if (card) { card.focus({ preventScroll: true }); card.scrollIntoView({ block: "nearest" }); }
 }
@@ -914,6 +996,32 @@ function cycleBg() {
   prefs.set("bg", next);
 }
 $("bg").addEventListener("click", cycleBg);
+// Sidebar width: drag its right edge; double-click the edge for the default width.
+function setSideWidth(px) {
+  if (px) document.documentElement.style.setProperty("--side-w", px + "px");
+  else document.documentElement.style.removeProperty("--side-w");
+  prefs.set("sidew", px || "");
+}
+(() => {
+  const grip = $("side-grip");
+  let start = null;
+  grip.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    start = $("side").getBoundingClientRect().left;
+    document.body.classList.add("resizing");
+  });
+  grip.addEventListener("pointermove", (e) => {
+    if (start === null) return;
+    setSideWidth(Math.round(Math.max(140, Math.min(innerWidth * 0.6, e.clientX - start))));
+  });
+  const end = () => { start = null; document.body.classList.remove("resizing"); };
+  grip.addEventListener("pointerup", end);
+  grip.addEventListener("pointercancel", end);
+  grip.addEventListener("dblclick", () => setSideWidth(null));
+})();
+
 function toggleSide() {
   document.body.classList.toggle("no-side");
   prefs.set("side", document.body.classList.contains("no-side") ? "0" : "1");
@@ -986,5 +1094,6 @@ document.addEventListener("keydown", (e) => {
   document.documentElement.style.setProperty("--tile", tile + "px");
   document.body.dataset.bg = prefs.get("bg", "white");
   if (prefs.get("side", "1") === "0") document.body.classList.add("no-side");
+  if (+prefs.get("sidew", "")) setSideWidth(+prefs.get("sidew", ""));
   route();
 })();

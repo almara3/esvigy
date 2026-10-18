@@ -746,3 +746,81 @@ def test_compare_in_a_folder_with_one_file(ui):
     ui.keys("c")
     ui.wait(lambda: ui.visible_panes() == 2)
     assert ui.by_id("v-name").text == "only.svg ⇄ only.svg"
+
+
+# ---------------------------------------------------------------- files in the sidebar
+
+def side_files(ui):
+    """[(name, folder of the tree node it is listed under, highlighted, A/B mark)] of the sidebar's file rows."""
+    return ui.js("""
+        return [...document.querySelectorAll('#tree .row.file')].map(r => [
+            r.querySelector('.label').textContent,
+            r.closest('ul.files').parentElement.querySelector(':scope > .row .label').textContent,
+            r.classList.contains('cur'), r.querySelector('.ab').textContent]);
+    """)
+
+
+def side_row(ui, name):
+    return next(r for r in ui.d.find_elements(By.CSS_SELECTOR, "#tree .row.file")
+                if r.find_element(By.CSS_SELECTOR, ".label").text == name)
+
+
+def test_sidebar_lists_the_current_folders_files_only(ui):
+    ui.wait(lambda: [n for n, *_ in side_files(ui)] == ui.card_names())
+    assert {folder for _, folder, *_ in side_files(ui)} == {"root"}
+    ui.d.get(ui.url + "#dir=sub")
+    ui.wait(lambda: [n for n, *_ in side_files(ui)] == ["mm.svg", "zipped.svgz"])
+    assert {folder for _, folder, *_ in side_files(ui)} == {"sub"}  # root's files are gone
+    ui.by_id("filter").send_keys("zip")
+    ui.wait(lambda: [n for n, *_ in side_files(ui)] == ["zipped.svgz"])
+
+
+def test_sidebar_opens_files_and_follows_the_viewer(ui):
+    ui.wait(lambda: side_files(ui))
+    side_row(ui, "b.svg").click()
+    ui.wait(lambda: ui.viewer_open() and ui.by_id("v-name").text == "b.svg")
+    assert [n for n, _, cur, _ in side_files(ui) if cur] == ["b.svg"]
+    side_row(ui, "a.svg").click()  # switches the file, no extra history entry
+    ui.wait(lambda: ui.by_id("v-name").text == "a.svg")
+    ui.keys(Keys.ARROW_RIGHT)
+    ui.wait(lambda: [n for n, _, cur, _ in side_files(ui) if cur] == ["b.svg"])
+    ui.keys(Keys.ESCAPE)
+    ui.wait(lambda: not ui.viewer_open())
+    assert not [n for n, _, cur, _ in side_files(ui) if cur]
+
+
+def test_sidebar_in_compare_mode(ui):
+    ui.d.get(ui.url + "#file=a.svg&vs=b.svg")
+    ui.wait(lambda: ui.visible_panes() == 2 and side_files(ui))
+    marks = lambda: {n: ab for n, _, _, ab in side_files(ui) if ab}
+    ui.wait(lambda: marks() == {"a.svg": "A", "b.svg": "B"})
+    side_row(ui, "viewbox-only.svg").click()  # click: side B
+    ui.wait(lambda: ui.by_id("v-name").text == "a.svg ⇄ viewbox-only.svg")
+    ActionChains(ui.d).key_down(Keys.SHIFT).click(side_row(ui, "viewbox-only.svg")).key_up(Keys.SHIFT).perform()
+    ui.wait(lambda: marks() == {"viewbox-only.svg": "A B"})  # Shift+click: side A
+
+
+def test_sidebar_thumbnails_and_hover_text(ui):
+    ui.wait(lambda: ui.js("return [...document.querySelectorAll('.card img')].every(i => i.getAttribute('src'))"),
+            timeout=60)
+    ui.wait(lambda: ui.js("return [...document.querySelectorAll('#tree .row.file .mini')].every(i => i.getAttribute('src'))"))
+    row = side_row(ui, "a.svg")
+    ActionChains(ui.d).move_to_element(row).perform()
+    ui.wait(lambda: row.get_attribute("title") == "a.svg\n200×100 · " + ui.js(
+        "return document.querySelector('.card .meta .size').textContent"))
+
+
+def test_sidebar_can_be_resized_and_keeps_its_width(ui):
+    side = ui.by_id("side")
+    before = side.rect["width"]
+    grip = ui.by_id("side-grip")
+    # the drag starts at the middle of the handle, so the new width is where the pointer ends up
+    wanted = grip.rect["x"] + grip.rect["width"] / 2 + 120 - side.rect["x"]
+    ActionChains(ui.d).move_to_element(grip).click_and_hold().move_by_offset(60, 0) \
+        .move_by_offset(60, 0).release().perform()
+    ui.wait(lambda: abs(side.rect["width"] - wanted) <= 2)
+    ui.d.get("about:blank")
+    ui.d.get(ui.url)
+    ui.wait(lambda: abs(ui.by_id("side").rect["width"] - wanted) <= 2)
+    ActionChains(ui.d).double_click(ui.by_id("side-grip")).perform()  # back to the default
+    ui.wait(lambda: abs(ui.by_id("side").rect["width"] - before) <= 2)
