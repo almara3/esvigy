@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -690,6 +691,36 @@ def chromium_profile():
     return tempfile.mkdtemp(prefix="esvigy-chromium-")
 
 
+def remove_profile(profile, proc=None, timeout=10):
+    """Delete a Chromium data folder from chromium_profile() once the browser `proc` is gone.
+
+    Chromium's helper processes (network service, zygote) outlive the main process for a moment
+    and keep writing into the folder (its cache holds copies of viewed files), so a single
+    rmtree() can leave it behind. Wait for the browser's whole process group (open_browser()
+    starts it in its own), then delete until the folder stays gone.
+    """
+    deadline = time.monotonic() + timeout
+    if proc is not None:
+        try:
+            proc.wait(max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        # Only a group of its own (never ours: pid 0 or our group would signal esvigy itself).
+        if hasattr(os, "killpg") and proc.pid > 0 and proc.pid != os.getpgrp():
+            try:
+                while time.monotonic() < deadline:
+                    os.killpg(proc.pid, 0)  # raises once no process of the group is left
+                    time.sleep(0.05)
+                os.killpg(proc.pid, 9)  # stragglers: SIGKILL (signal.SIGKILL isn't on Windows)
+            except (ProcessLookupError, PermissionError):
+                pass
+    for _ in range(20):  # Windows may hold files a moment longer
+        shutil.rmtree(profile, ignore_errors=True)
+        if not os.path.exists(profile):
+            return
+        time.sleep(0.1)
+
+
 def choose_browser(browser):
     """(mode, exe) for -b BROWSER. mode is "firefox-app", "chromium-app", "firefox", "default" or "none"."""
     if browser in ("auto", "app"):
@@ -746,8 +777,9 @@ def open_browser(url, mode, exe):
         args = [exe, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check"]
         if sys.platform not in ("win32", "darwin"):
             args.append("--class=esvigy")  # X11 window class
+        # Its own process group, so remove_profile() can wait for all of its processes.
         return subprocess.Popen(args + [f"--app={url}"], stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL), profile
+                                stderr=subprocess.DEVNULL, start_new_session=True), profile
     if mode == "firefox":
         subprocess.Popen([exe, "--new-window", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True)
@@ -809,12 +841,7 @@ def main():
             proc.terminate()
     finally:
         if profile:
-            if proc:
-                try:
-                    proc.wait(10)  # its files are still open until it has exited
-                except subprocess.TimeoutExpired:
-                    pass
-            shutil.rmtree(profile, ignore_errors=True)
+            remove_profile(profile, proc)
         if page:
             page.unlink(missing_ok=True)
 

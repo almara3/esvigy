@@ -678,9 +678,10 @@ def test_real_app_window_keeps_the_token_off_command_lines(tmp_path, monkeypatch
         assert not [pid for pid, c in cmdlines.items() if srv.token.encode() in c], cmdlines
     finally:
         proc.terminate()
-        proc.wait(20)
         if profile:
-            shutil.rmtree(profile, ignore_errors=True)
+            esvigy.remove_profile(profile, proc)
+        else:
+            proc.wait(20)
         srv.shutdown()
         srv.server_close()
         esvigy.CACHE_DIR = old_cache

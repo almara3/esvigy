@@ -7,9 +7,12 @@ can make requests to 127.0.0.1 but not read the answers), and the SVG files them
 
 import os
 import socket
+import shutil
 import stat
+import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -464,6 +467,8 @@ def test_token_is_never_on_a_command_line(tree, cache, data_dir, monkeypatch, ca
     started, servers = [], []
 
     class FakeProc:
+        pid = -1  # no real process behind it
+
         def __init__(self, args, **kw):
             started.append(list(args))
 
@@ -498,3 +503,62 @@ def test_token_is_never_on_a_command_line(tree, cache, data_dir, monkeypatch, ca
     else:
         assert len(started) == 1 and started[0][-1].split("=", 1)[-1].startswith("file:")  # also --app=file:...
     assert not list(data_dir.glob("open-*.html"))  # removed when esvigy quits
+
+
+# ---------------------------------------------------------------- Chromium profile cleanup
+# Chromium's helper processes (network service, zygote) outlive its main process for a moment
+# and keep writing into the profile, which held copies of viewed files in its cache.
+
+# A stand-in browser: the main process exits at once; a child it started keeps writing
+# into the profile for a while, as Chromium's network service does.
+FAKE_BROWSER = r"""
+import os, subprocess, sys, time
+profile, done = sys.argv[1], sys.argv[2]
+if len(sys.argv) == 3:
+    subprocess.Popen([sys.executable, __file__, profile, done, "child"])
+    sys.exit(0)
+os.makedirs(os.path.join(profile, "Default", "Cache"), exist_ok=True)
+end = time.time() + 1.0
+i = 0
+while time.time() < end:
+    try:
+        with open(os.path.join(profile, "Default", "Cache", "data_%d" % i), "w") as f:
+            f.write("cached file contents")
+    except OSError:
+        pass  # the folder is being deleted under us
+    i += 1
+    time.sleep(0.005)
+open(done, "w").close()
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups")
+def test_chromium_profile_is_removed_after_its_helpers_exit(tmp_path):
+    script = tmp_path / "fake_browser.py"
+    script.write_text(FAKE_BROWSER)
+    profile, done = esvigy.chromium_profile(), tmp_path / "helper-done"
+    proc = subprocess.Popen([sys.executable, str(script), profile, str(done)], start_new_session=True)
+    proc.wait()  # the "window" is closed; its helper is still busy
+    esvigy.remove_profile(profile, proc)
+    deadline = time.time() + 10
+    while not done.exists() and time.time() < deadline:  # only now can nothing write any more
+        time.sleep(0.05)
+    try:
+        assert done.exists()
+        assert not os.path.exists(profile)
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups")
+def test_chromium_app_window_gets_its_own_process_group(tmp_path):
+    exe = tmp_path / "chromium"
+    exe.write_text("#!/bin/sh\nsleep 30\n")
+    exe.chmod(0o755)
+    proc, profile = esvigy.open_browser("file:///nothing.html", "chromium-app", str(exe))
+    try:
+        assert os.getpgid(proc.pid) == proc.pid  # so remove_profile() can wait for all of it
+    finally:
+        proc.kill()
+        esvigy.remove_profile(profile, proc)
+    assert not os.path.exists(profile)
