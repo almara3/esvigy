@@ -333,6 +333,13 @@ def test_find_chromium_in_mac_applications(tmp_path, monkeypatch):
     assert esvigy.find_chromium() == str(exe)
 
 
+def test_find_chromium_finds_vivaldi(tmp_path, monkeypatch):
+    exe = fake_exe(tmp_path / "bin" / "vivaldi")
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
+    monkeypatch.setenv("PATH", str(exe.parent))
+    assert esvigy.find_chromium() == str(exe)
+
+
 def test_find_chromium_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(esvigy.sys, "platform", "linux")
     monkeypatch.setenv("PATH", str(tmp_path))

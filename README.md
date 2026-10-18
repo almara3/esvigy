@@ -6,7 +6,7 @@ TIFFs and the common raster formats (PNG, JPEG, GIF, WebP, AVIF, BMP, ICO).
 Classic image viewers (xviewer, eog, …) render SVG with librsvg, which gets very
 slow on big files. Firefox's renderer is much faster, so esvigy uses Firefox as
 its engine: a tiny local Python server (stdlib only) serves the folder, and the
-UI runs in a Firefox window. Without Firefox, it uses Chrome, Chromium, Edge or Brave instead.
+UI runs in a Firefox window. Without Firefox, it uses Chrome, Chromium, Edge, Brave or Vivaldi instead.
 
 ![The thumbnail grid](docs/grid.png)
 
@@ -15,7 +15,7 @@ UI runs in a Firefox window. Without Firefox, it uses Chrome, Chromium, Edge or 
 ## Usage
 
     ./esvigy.py [DIR | FILE.svg]       # opens its own window: Firefox, else Chromium
-    ./esvigy.py ~/drawings -b chromium # own window in Chrome/Chromium/Edge/Brave even if Firefox is there
+    ./esvigy.py ~/drawings -b chromium # own window in Chrome/Chromium/Edge/Brave/Vivaldi even if Firefox is there
     ./esvigy.py ~/drawings -b firefox  # normal Firefox window instead of the app window
     ./esvigy.py ~/drawings -b none    # just print the URL
     ./esvigy.py -h
@@ -25,7 +25,7 @@ Tip: `ln -s "$PWD/esvigy.py" ~/.local/bin/esvigy`
 **Firefox is preferred, Chromium works too.** esvigy is tested with both (the browser tests
 run in each). Firefox has the most even SVG speed (see the benchmark); Chromium is close on
 most files, but up to about 2× slower on huge piles of small shapes. Chromium is found as Google
-Chrome, Chromium, Microsoft Edge (part of Windows) or Brave. Other browsers (`-b default`) should
+Chrome, Chromium, Microsoft Edge (part of Windows), Brave or Vivaldi. Other browsers (`-b default`) should
 work, but are untested.
 
 ### macOS and Windows
@@ -187,5 +187,7 @@ The screenshots above come from `.venv/bin/python docs/screenshots.py`.
   and that hostile TIFFs (looping directories, false sizes, decompression bombs) are refused before decoding.
   Firefox gets the same preferences as esvigy's app profile.
   Each browser is skipped if it (or selenium) is missing; geckodriver/chromedriver are downloaded on first run.
+  The Chromium tests run in Chrome or Chromium if installed; with only Edge, Brave or Vivaldi, selenium
+  downloads Chrome for Testing for them.
 
 Tests never touch your real thumbnail cache; it can also be redirected with `ESVIGY_CACHE=/some/dir`.

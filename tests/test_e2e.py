@@ -6,6 +6,7 @@ lookup as for its own window). Run only these with `pytest -m e2e`, or everythin
 """
 
 import json
+import os
 import re
 import shutil
 import struct
@@ -42,7 +43,11 @@ def firefox_driver(downloads):
 
 def chromium_driver(downloads):
     opts = webdriver.ChromeOptions()
-    opts.binary_location = esvigy.find_chromium()
+    exe = esvigy.find_chromium()
+    # chromedriver drives only Chrome and Chromium themselves; for Edge, Brave or Vivaldi selenium
+    # uses (and on first run downloads) Chrome for Testing, the same engine.
+    if re.search(r"chrom(e|ium)", os.path.basename(exe), re.I):
+        opts.binary_location = exe
     opts.add_argument("--headless=new")
     opts.add_argument("--window-size=1300,800")
     opts.add_experimental_option("prefs", {"download.default_directory": str(downloads),

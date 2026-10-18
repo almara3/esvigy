@@ -625,16 +625,18 @@ def find_firefox():
 
 # Chromium-based browsers, in order of preference. Edge comes with Windows, so there is always one.
 CHROMIUM_PROGRAMS = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome",
-                     "microsoft-edge", "microsoft-edge-stable", "msedge", "brave-browser", "brave")
-CHROMIUM_MAC_APPS = ("Google Chrome", "Chromium", "Microsoft Edge", "Brave Browser")
+                     "microsoft-edge", "microsoft-edge-stable", "msedge", "brave-browser", "brave",
+                     "vivaldi-stable", "vivaldi")
+CHROMIUM_MAC_APPS = ("Google Chrome", "Chromium", "Microsoft Edge", "Brave Browser", "Vivaldi")
 CHROMIUM_WIN_EXES = (("Google", "Chrome", "Application", "chrome.exe"),
                      ("Chromium", "Application", "chrome.exe"),
                      ("Microsoft", "Edge", "Application", "msedge.exe"),
-                     ("BraveSoftware", "Brave-Browser", "Application", "brave.exe"))
+                     ("BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+                     ("Vivaldi", "Application", "vivaldi.exe"))
 
 
 def find_chromium():
-    """Full path of a Chromium-based browser (Chrome, Chromium, Edge, Brave), looked up like find_firefox()."""
+    """Full path of a Chromium-based browser (Chrome, Chromium, Edge, Brave, Vivaldi), looked up like find_firefox()."""
     if sys.platform == "darwin":
         candidates = [Path(base) / f"{app}.app" / "Contents" / "MacOS" / app
                       for app in CHROMIUM_MAC_APPS for base in ("/Applications", Path.home() / "Applications")]
@@ -696,12 +698,13 @@ def choose_browser(browser):
         if exe := find_chromium():
             return "chromium-app", exe
         return "default", None
-    if browser == "chromium":
-        exe = find_chromium()
-        return ("chromium-app", exe) if exe else ("default", None)
-    if browser == "firefox":
-        exe = find_firefox()
-        return ("firefox", exe) if exe else ("default", None)
+    if browser in ("chromium", "firefox"):
+        exe = find_chromium() if browser == "chromium" else find_firefox()
+        if exe:
+            return ("chromium-app" if browser == "chromium" else "firefox"), exe
+        print(f"esvigy: no {'Chromium-based browser' if browser == 'chromium' else 'Firefox'} found, "
+              "opening the default browser instead", file=sys.stderr)
+        return "default", None
     return browser, None
 
 
@@ -772,7 +775,7 @@ def main():
     ap.add_argument("-b", "--browser", choices=("auto", "app", "chromium", "firefox", "default", "none"),
                     default="auto",
                     help="app (= auto): own window without tabs/toolbars that quits esvigy when closed, in Firefox "
-                         "if installed, else in Chrome/Chromium/Edge/Brave; chromium: that window in Chromium even "
+                         "if installed, else in Chrome/Chromium/Edge/Brave/Vivaldi; chromium: that window in Chromium even "
                          "if Firefox is there; firefox: normal new Firefox window; default: system browser; "
                          "none: only print the URL")
     ap.add_argument("-v", "--verbose", action="store_true", help="log every request")
