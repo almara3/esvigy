@@ -358,7 +358,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             return self.serve_static(path[len("/static/"):])
         if path == "/api/list":
-            return self.api_list(query.get("dir", [""])[0])
+            return self.api_list(query.get("dir", [""])[0], dirs_only="dirs" in query)
         if path.startswith("/file/"):
             return self.serve_file(path[len("/file/"):], "fix" in query)
         if path.startswith("/thumb/"):
@@ -442,7 +442,9 @@ class Handler(BaseHTTPRequestHandler):
                 f"frame-ancestors {ancestors}; base-uri 'none'; form-action 'none'; object-src 'none'")
         self.send_bytes(p.read_bytes(), STATIC_TYPES.get(p.suffix, "application/octet-stream"), headers=headers)
 
-    def api_list(self, rel):
+    def api_list(self, rel, dirs_only=False):
+        """List a folder: its subfolders and documents. `dirs_only` (for the folder tree) skips
+        the documents, which saves reading the start of every file (slow on network drives)."""
         root = self.server.root  # once: /api/open may swap it while we work
         d = self.resolve(root, rel)
         if d is None or not d.is_dir():
@@ -456,13 +458,15 @@ class Handler(BaseHTTPRequestHandler):
             if e.name.startswith("."):
                 continue
             try:
+                if dirs_only and not e.is_dir():
+                    continue
                 # Symlinks leading out of the root would 404 when opened; don't list (or read) them.
                 real = Path(e.path).resolve()
                 if not real.is_relative_to(root):
                     continue
                 if e.is_dir():
                     dirs.append(e.name)
-                elif e.is_file() and e.name.lower().endswith(DOC_EXTS):
+                elif not dirs_only and e.is_file() and e.name.lower().endswith(DOC_EXTS):
                     st = e.stat()
                     key = thumb_key(real, st)
                     f = {"name": e.name, "size": st.st_size, "mtime": st.st_mtime,

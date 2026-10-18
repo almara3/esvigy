@@ -761,8 +761,9 @@ def side_files(ui):
 
 
 def side_row(ui, name):
+    # textContent, not .text: Selenium's .text is empty for rows of a folded folder
     return next(r for r in ui.d.find_elements(By.CSS_SELECTOR, "#tree .row.file")
-                if r.find_element(By.CSS_SELECTOR, ".label").text == name)
+                if r.find_element(By.CSS_SELECTOR, ".label").get_attribute("textContent") == name)
 
 
 def test_sidebar_lists_the_current_folders_files_only(ui):
@@ -824,3 +825,39 @@ def test_sidebar_can_be_resized_and_keeps_its_width(ui):
     ui.wait(lambda: abs(ui.by_id("side").rect["width"] - wanted) <= 2)
     ActionChains(ui.d).double_click(ui.by_id("side-grip")).perform()  # back to the default
     ui.wait(lambda: abs(ui.by_id("side").rect["width"] - before) <= 2)
+
+
+def test_sidebar_files_dont_wait_for_parent_folders(ui, monkeypatch):
+    # On a slow (network) drive, listing a parent folder is slow: the server reads the start of
+    # every file in it. The current folder's files must show without waiting for that.
+    real = esvigy.read_head
+
+    def slow_read_head(path):
+        if path.parent == ui.root:
+            time.sleep(1.0)
+        return real(path)
+
+    monkeypatch.setattr(esvigy, "read_head", slow_read_head)
+    ui.d.get("about:blank")
+    t0 = time.time()
+    ui.d.get(ui.url + "#dir=sub")  # a fresh page: nothing listed yet
+    ui.wait(lambda: [n for n, *_ in side_files(ui)] == ["mm.svg", "zipped.svgz"], timeout=30)
+    assert time.time() - t0 < 2.5, "the sidebar waited for the parent folder's listing"
+    ui.wait(lambda: [r.text for r in ui.d.find_elements(By.CSS_SELECTOR, "#tree > ul > li > ul > li > .row .label")]
+            [:1] == ["docs"], timeout=30)  # the parent's subfolders still show up
+
+
+def test_current_folder_can_be_folded(ui):
+    ui.d.get(ui.url + "#dir=single")  # only files, no subfolders: still foldable
+    ui.wait(lambda: [n for n, *_ in side_files(ui)] == ["only.svg"])
+    node = next(r for r in ui.d.find_elements(By.CSS_SELECTOR, "#tree .row:not(.file)")
+                if r.find_element(By.CSS_SELECTOR, ".label").text == "single")
+    assert node.find_element(By.CSS_SELECTOR, ".twisty").value_of_css_property("visibility") == "visible"
+    visible = lambda: side_row(ui, "only.svg").is_displayed()
+    node.click()  # the current folder: folds
+    ui.wait(lambda: not visible())
+    assert "dir=single" in ui.hash()  # still in that folder
+    node.click()
+    ui.wait(visible)
+    node.find_element(By.CSS_SELECTOR, ".twisty").click()  # the arrow works too
+    ui.wait(lambda: not visible())

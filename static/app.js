@@ -70,6 +70,22 @@ function list(dir) {
   return listCache.get(dir);
 }
 
+// Subfolders only (for the tree): cheap for the server, which then needn't read any file.
+// A full listing already loaded for the grid does as well.
+const dirCache = new Map();
+function listDirs(dir) {
+  if (listCache.has(dir)) return listCache.get(dir);
+  if (!dirCache.has(dir)) {
+    const p = fetch(BASE + "api/list?dirs&dir=" + encodeURIComponent(dir)).then((r) => {
+      if (!r.ok) throw new Error(r.status + " " + r.statusText);
+      return r.json();
+    });
+    p.catch(() => dirCache.delete(dir));
+    dirCache.set(dir, p);
+  }
+  return dirCache.get(dir);
+}
+
 const state = {
   dir: null,        // currently shown directory ("" = root)
   files: [],        // all SVGs in dir (sorted)
@@ -129,9 +145,13 @@ function makeNode(path, name) {
   row.title = path || name;
   const ul = el("ul");
   li.append(row, ul);
-  const node = { li, row, ul, twisty, loaded: false, open: false };
+  const node = { li, row, ul, twisty, loaded: false, open: false, hasDirs: null };
   treeNodes.set(path, node);
-  row.addEventListener("click", () => writeHash(path, null, true));
+  // A click opens the folder; on the folder already shown it folds it (and its files) away.
+  row.addEventListener("click", () => {
+    if (path !== state.dir) writeHash(path, null, true);
+    else node.open ? collapse(path) : expand(path);
+  });
   twisty.addEventListener("click", (e) => {
     e.stopPropagation();
     node.open ? collapse(path) : expand(path);
@@ -139,21 +159,48 @@ function makeNode(path, name) {
   return node;
 }
 
+// The node for `path`, created along with its ancestors if the tree hasn't been loaded that
+// far yet (their other subfolders are filled in by expand() when their listing arrives).
+function ensureNode(path) {
+  let node = treeNodes.get(path);
+  if (node || !path) return node;
+  const i = path.lastIndexOf("/");
+  const parent = ensureNode(i < 0 ? "" : path.slice(0, i));
+  if (!parent) return null;
+  node = makeNode(path, path.slice(i + 1));
+  parent.ul.append(node.li);
+  return node;
+}
+
+function showOpen(node) {
+  node.open = true;
+  node.li.classList.remove("closed");
+  node.twisty.textContent = "▾";
+  updateTwisty(node);
+}
+
+// A folder can be folded if it has subfolders or (the current one) files; unknown counts as yes.
+function updateTwisty(node) {
+  const files = node.li.querySelector(":scope > ul.files > li");
+  node.twisty.style.visibility = node.hasDirs === false && !files ? "hidden" : "";
+}
+
 async function expand(path) {
   const node = treeNodes.get(path);
   if (!node) return;
   if (!node.loaded) {
     let data;
-    try { data = await list(path); } catch { return; }
+    try { data = await listDirs(path); } catch { return; }
     node.loaded = true;
-    node.ul.replaceChildren();
     const dirs = data.dirs.slice().sort(collator.compare);
-    for (const d of dirs) node.ul.append(makeNode(joinPath(path, d), d).li);
-    if (!dirs.length) node.twisty.style.visibility = "hidden";
+    // Reuse nodes that exist already (the path to the current folder), so their files stay.
+    node.ul.replaceChildren(...dirs.map((d) => {
+      const p = joinPath(path, d);
+      return (treeNodes.get(p) ?? makeNode(p, d)).li;
+    }));
+    node.hasDirs = dirs.length > 0;
   }
-  node.open = true;
-  node.li.classList.remove("closed");
-  node.twisty.textContent = "▾";
+  showOpen(node);
 }
 
 function collapse(path) {
@@ -163,15 +210,17 @@ function collapse(path) {
   node.twisty.textContent = "▸";
 }
 
+// Show `dir` in the tree: its path right away, the parents' other subfolders as they load.
 async function revealInTree(dir) {
   const parts = dir ? dir.split("/") : [];
-  for (let i = 0; i <= parts.length; i++) await expand(parts.slice(0, i).join("/"));
+  const paths = parts.map((_, i) => parts.slice(0, i + 1).join("/"));
+  ensureNode(dir);
   for (const n of treeNodes.values()) n.row.classList.remove("sel");
+  for (const p of ["", ...paths]) showOpen(treeNodes.get(p));
   const node = treeNodes.get(dir);
-  if (node) {
-    node.row.classList.add("sel");
-    node.row.scrollIntoView({ block: "nearest" });
-  }
+  node.row.classList.add("sel");
+  node.row.scrollIntoView({ block: "nearest" });
+  await Promise.all(["", ...paths].map(expand));
 }
 
 // ---------------------------------------------------------------- files in the sidebar
@@ -194,7 +243,7 @@ function renderSideFiles() {
   sideRows.clear();
   sideObserver.disconnect();
   const node = treeNodes.get(state.dir);
-  if (!node) return;  // revealInTree() calls again once the node exists
+  if (!node) return;  // loadDir() builds it (revealInTree) before the grid is rendered
   const ul = el("ul", "files");
   for (const f of state.view) {
     const row = el("div", "row file");
@@ -210,6 +259,7 @@ function renderSideFiles() {
   }
   node.li.append(ul);
   sideList = ul;
+  updateTwisty(node);
   for (const row of sideRows.values()) sideObserver.observe(row);
   markSideFiles(false);
 }
@@ -274,7 +324,7 @@ async function loadDir(dir) {
     $("tree").append(ul);
     document.title = "esvigy — " + data.root;
   }
-  revealInTree(dir).then(() => { if (state.dir === dir) renderSideFiles(); });
+  revealInTree(dir);  // builds the path to `dir` at once, so renderGrid() can list its files there
   renderCrumbs(dir, data.root);
   state.files = data.files;
   sortFiles();
@@ -1029,6 +1079,7 @@ function toggleSide() {
 $("toggle-side").addEventListener("click", toggleSide);
 function refresh() {
   listCache.clear();
+  dirCache.clear();
   treeNodes.clear();
   $("tree").replaceChildren();
   state.dir = null;

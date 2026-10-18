@@ -364,3 +364,15 @@ def test_choose_browser(monkeypatch, browser, firefox, chromium, expect):
 
 def test_post_elsewhere_is_not_found(server):
     assert server.request("POST", "/api/list", headers={"X-Esvigy": "1"}).status == 404
+
+
+def test_folders_only_listing_reads_no_file(server, monkeypatch):
+    # The folder tree only needs subfolders; on a network drive reading every file is slow.
+    def no_reading(*a, **k):
+        raise AssertionError("a file was read")
+
+    monkeypatch.setattr(esvigy, "read_head", no_reading)
+    monkeypatch.setattr(esvigy, "image_size", no_reading)
+    d = server.get_json("/api/list?dirs&dir=")
+    assert d["dirs"] == ["sub"] and d["files"] == []
+    assert server.get_json("/api/list?dir=sub&dirs")["dirs"] == ["deeper"]
