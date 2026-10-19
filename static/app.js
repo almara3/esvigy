@@ -92,6 +92,7 @@ const state = {
   view: [],         // files after filter
   current: -1,      // index into view while the viewer is open
   cmp: -1,          // index of the comparison file (compare mode), else -1
+  path: "", sep: "/",  // absolute path of dir and the OS's separator (for copying paths)
   openedByPush: false,
 };
 
@@ -315,6 +316,8 @@ async function loadDir(dir) {
     data = await list(dir);
   } catch (e) {
     grid.replaceChildren(el("div", "note", "Cannot open folder: " + e.message));
+    state.path = "";
+    $("copy-path").hidden = true;  // nothing to copy
     return;
   }
   if (state.dir !== dir) return;
@@ -326,6 +329,9 @@ async function loadDir(dir) {
   }
   revealInTree(dir);  // builds the path to `dir` at once, so renderGrid() can list its files there
   renderCrumbs(dir, data.root);
+  state.path = data.path;
+  state.sep = data.sep;
+  $("copy-path").hidden = false;
   state.files = data.files;
   sortFiles();
   renderGrid();
@@ -365,6 +371,38 @@ function renderCrumbs(dir, rootName) {
     add(p, parts.slice(0, i + 1).join("/"));
   });
 }
+
+// File names may contain any character but "/", including newlines and terminal escape codes
+// (archives and downloads can create such names). Pasted into a terminal, those would run the rest
+// of the name as a command (an escape code can even end the terminal's bracketed-paste protection),
+// so such paths are never copied. Replacing the characters wouldn't help: it would name another file.
+const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/;
+
+// Copy buttons: put full paths (one per line) on the clipboard and show ✓ for a moment, or ✗ if a
+// path has control characters (the tooltip says why) or the browser refused.
+async function copyPath(btn, paths) {
+  const unsafe = paths.some((p) => CONTROL_CHARS.test(p));
+  let ok = !unsafe;
+  if (ok) {
+    try { await navigator.clipboard.writeText(paths.join("\n")); } catch { ok = false; }
+  }
+  clearTimeout(btn._reset);
+  btn._title ??= btn.title;
+  btn.textContent = ok ? "✓" : "✗";
+  if (unsafe) btn.title = "Not copied: the name contains a line break or terminal control code, "
+                          + "which could run as a command if pasted into a terminal";
+  btn._reset = setTimeout(() => {
+    btn.textContent = "⧉";
+    btn.title = btn._title;
+    btn._title = undefined;
+  }, unsafe ? 4000 : 1200);
+}
+const filePath = (f) => state.path.replace(/[\\/]$/, "") + state.sep + f.name;
+$("copy-path").addEventListener("click", (e) => copyPath(e.currentTarget, [state.path]));
+$("v-copy").addEventListener("click", (e) => {
+  const files = state.cmp >= 0 ? [state.view[state.current], state.view[state.cmp]] : [state.view[state.current]];
+  copyPath(e.currentTarget, files.map(filePath));
+});
 
 function renderGrid() {
   const q = $("filter").value.trim().toLowerCase();
@@ -908,6 +946,9 @@ function openViewer(i, j = -1, page = 1, vspage = 1) {
 
   const n = state.view.length, fa = state.view[i], fb = state.view[j];
   $("v-name").textContent = compare ? fa.name + "  ⇄  " + fb.name : fa.name;
+  const copyTitle = compare ? "Copy both files' full paths (one per line)" : "Copy the file's full path";
+  if ($("v-copy")._title === undefined) $("v-copy").title = copyTitle;
+  else $("v-copy")._title = copyTitle;  // showing "not copied" right now: the new title comes after
   $("v-info").textContent = compare ? "" : fmtDims(fa) + " · " + fmtSize(fa.size);
   $("v-pos").textContent = compare ? `A ${i + 1} · B ${j + 1} / ${n}` : i + 1 + " / " + n;
   $("v-raw").href = fileUrl(state.dir, fa);

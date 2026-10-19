@@ -137,6 +137,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 #crumbs a { color: var(--text); text-decoration: none; cursor: pointer; }
 #crumbs a:hover { text-decoration: underline; }
 #crumbs .sep { color: var(--muted); margin: 0 4px; }
+.bar .copy { flex: none; min-width: 2em; }
 #status, #v-info, #v-time, #v-pos, #v-zoom { color: var(--muted); font-variant-numeric: tabular-nums; }
 #tile { width: 110px; }
 

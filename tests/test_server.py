@@ -48,6 +48,8 @@ def test_list_root(server):
 def test_list_subdir(server):
     d = server.get_json("/api/list?dir=sub")
     assert d["dir"] == "sub" and d["dirs"] == ["deeper"]
+    # absolute, with the OS's separator, for the copy-path buttons
+    assert d["path"] == str((server.root / "sub").resolve()) and d["sep"] == os.sep
     files = {f["name"]: f for f in d["files"]}
     assert files["mm.svg"]["w"] == pytest.approx(793.701, abs=0.01)
     assert files["zipped.svgz"]["w"] == 64

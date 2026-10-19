@@ -494,7 +494,9 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, RuntimeError):
                 continue
         rel_root = "" if d == root else d.relative_to(root).as_posix()
-        self.send_json({"dir": rel_root, "root": root.name or str(root), "dirs": dirs, "files": files})
+        # "path" (with the OS's separator) is only for the UI's copy-path buttons.
+        self.send_json({"dir": rel_root, "root": root.name or str(root), "path": str(d), "sep": os.sep,
+                        "dirs": dirs, "files": files})
 
     def api_open(self):
         """Pick a folder with the desktop's native dialog and make it the new root."""

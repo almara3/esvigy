@@ -15,6 +15,7 @@ import threading
 import time
 import zlib
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -235,6 +236,110 @@ def test_compare_deep_link(ui):
     ui.d.get(ui.url + "#file=viewbox-only.svg&vs=a.svg")
     ui.wait(lambda: ui.by_id("v-name").text == "viewbox-only.svg ⇄ a.svg")
     assert ui.visible_panes() == 2
+
+
+def pasted(ui):
+    """What the clipboard holds, pasted into the filter field (reading it directly needs a permission)."""
+    f = ui.by_id("filter")
+    f.clear()
+    f.send_keys(Keys.CONTROL, "v")
+    text = f.get_attribute("value")
+    f.clear()
+    return text
+
+
+def test_copy_full_paths(ui):
+    root = str(ui.root.resolve())
+    ui.by_id("copy-path").click()
+    ui.wait(lambda: ui.by_id("copy-path").text == "✓")
+    assert pasted(ui) == root
+    ui.d.get(ui.url + "#dir=sub&file=mm.svg")
+    ui.wait(lambda: ui.by_id("v-name").text == "mm.svg")
+    ui.by_id("v-copy").click()
+    ui.wait(lambda: ui.by_id("v-copy").text == "✓")
+    assert pasted(ui) == os.path.join(root, "sub", "mm.svg")
+
+
+def test_copy_both_paths_in_compare_mode(ui):
+    ui.d.get(ui.url + "#file=a.svg&vs=b.svg")
+    ui.wait(lambda: ui.by_id("v-name").text == "a.svg ⇄ b.svg")
+    ui.by_id("v-copy").click()
+    ui.wait(lambda: ui.by_id("v-copy").text == "✓")
+    # an <input> drops line breaks on paste, so read the clipboard through a textarea
+    ui.js("""const t = document.createElement("textarea"); t.id = "paste"; document.body.append(t);""")
+    t = ui.by_id("paste")
+    t.send_keys(Keys.CONTROL, "v")
+    root = str(ui.root.resolve())
+    assert t.get_attribute("value") == os.path.join(root, "a.svg") + "\n" + os.path.join(root, "b.svg")
+
+
+
+def pasted_text(ui):
+    """The clipboard, pasted into a textarea (an <input> would drop line breaks)."""
+    ui.js("""document.getElementById("paste")?.remove();
+             const t = document.createElement("textarea"); t.id = "paste"; document.body.append(t);""")
+    t = ui.by_id("paste")
+    t.send_keys(Keys.CONTROL, "v")
+    text = t.get_attribute("value")
+    ui.js('document.getElementById("paste").remove()')
+    return text
+
+
+# A newline runs the rest of a pasted name as a command; ESC[201~ ends bracketed paste first.
+EVIL_NAME = "plot.svg\n\x1b[201~echo pwned\n.svg"
+SMALL_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>'
+
+
+@pytest.fixture
+def scratch_dir(ui):
+    """Make a folder in the shared test root, and remove it afterwards (other tests list the root)."""
+    made = []
+
+    def make(name):
+        d = ui.root / name
+        d.mkdir()
+        made.append(d)
+        return d
+
+    yield make
+    for d in made:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_paths_with_control_characters_are_not_copied(ui, scratch_dir):
+    d = scratch_dir("ctl")
+    (d / "safe ü.svg").write_text(SMALL_SVG)
+    (d / EVIL_NAME).write_text(SMALL_SVG)
+    safe = os.path.join(str(ui.root.resolve()), "ctl", "safe ü.svg")
+
+    ui.d.get(ui.url + "#dir=ctl&file=" + quote("safe ü.svg"))
+    ui.wait(lambda: ui.by_id("v-name").text == "safe ü.svg")
+    ui.by_id("v-copy").click()
+    ui.wait(lambda: ui.by_id("v-copy").text == "✓")
+
+    ui.d.get(ui.url + "#dir=ctl&file=" + quote(EVIL_NAME))
+    ui.wait(lambda: ui.js("return document.getElementById('v-name').textContent") == EVIL_NAME)
+    ui.by_id("v-copy").click()
+    ui.wait(lambda: ui.by_id("v-copy").text == "✗")
+    assert "Not copied" in ui.by_id("v-copy").get_attribute("title")
+    assert pasted_text(ui) == safe  # the clipboard still holds the safe path
+
+    # in compare mode, one bad name is enough to refuse both
+    ui.d.get(ui.url + "#dir=ctl&file=" + quote("safe ü.svg") + "&vs=" + quote(EVIL_NAME))
+    ui.wait(lambda: "⇄" in ui.by_id("v-name").text)
+    ui.wait(lambda: ui.by_id("v-copy").text == "⧉", timeout=10)
+    ui.by_id("v-copy").click()
+    ui.wait(lambda: ui.by_id("v-copy").text == "✗")
+    assert pasted_text(ui) == safe
+
+
+def test_folder_with_control_characters_is_not_copied(ui, scratch_dir):
+    bad = "bad\x1b]0;title\x07dir"  # an escape code in a folder name
+    (scratch_dir(bad) / "x.svg").write_text(SMALL_SVG)
+    ui.d.get(ui.url + "#dir=" + quote(bad))
+    ui.wait(lambda: not ui.by_id("copy-path").get_attribute("hidden") and "x.svg" in ui.card_names())
+    ui.by_id("copy-path").click()
+    ui.wait(lambda: ui.by_id("copy-path").text == "✗")
 
 
 def test_table_view_sorts_by_column(ui):
