@@ -45,6 +45,10 @@ doesn't quit the browser, so quit it with Cmd+Q (or press Ctrl+C in the terminal
 - Thumbnails are rendered once by the browser in a hidden frame (its own process, so the UI never freezes), two at a time, visible ones first,
   and cached in `~/.cache/esvigy/thumbs` (keyed on path + mtime + size), so a
   folder you've seen before opens instantly
+- The thumbnail cache (`~/.cache/esvigy/thumbs`, or `ESVIGY_CACHE`) cleans itself at every start:
+  thumbnails unused for 90 days go, and above 1 GB the longest-unused ones, down to 800 MB.
+  By hand: `esvigy --cache` (size), `--prune-cache [DAYS]` (unused for DAYS days, default 30),
+  `--clear-cache` (all). Only esvigy's own files in that folder are ever removed.
 - Files that change while shown (e.g. a plotting script re-run) are noticed within about 2 s:
   their thumbnails are redrawn and the viewer reloads them, keeping zoom and page. esvigy checks
   only names, modification times and sizes (no file is read), so a file replaced by one with the
@@ -113,7 +117,22 @@ doesn't quit the browser, so quit it with Cmd+Q (or press Ctrl+C in the terminal
   absolute `PATH` entries or their usual install locations, never in the current folder. On
   Windows only `.exe` files count, so a planted `firefox.bat` or `chrome.bat` next to your files can't run.
 - Thumbnails (`~/.cache/esvigy/thumbs`) and the browser profiles are created `0700`. Thumbnails
-  are kept forever; delete the folder to clear them.
+  are cleaned up automatically (see Features; `--clear-cache` removes all), and only esvigy's own
+  files in that folder are ever deleted.
+
+## Known issues
+
+- Snap-packaged browsers (Ubuntu's default Firefox and Chromium) can't open the private start page
+  in `~/.local/share/esvigy/`; open the URL printed in the terminal instead.
+- PDF viewer: the label shows page 1's size, thumbnails always show page 1, and zooming beyond
+  about 10× gets blurry.
+- The bundled pdf.js is 6.3.289; 6.4.299 has hang and crash fixes.
+- The pdf.js worker has no Content Security Policy of its own (extra hardening only).
+- The bundled TIFF decoder, UTIF.js, is unmaintained; esvigy's checks cover its known hang and
+  memory problems, but new bugs won't be fixed upstream.
+- The folder fingerprint used to notice changed files (`folder_sig()`) doesn't skip symlinks
+  leading out of the folder, as the listing does (harmless; consistency only).
+- Windows: when saving a thumbnail fails because the file is in use, the UI may show it broken.
 
 ## Own window
 

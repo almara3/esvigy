@@ -167,6 +167,7 @@ def tree(tmp_path):
 def cache(tmp_path, monkeypatch):
     d = tmp_path / "cache"
     monkeypatch.setattr(esvigy, "CACHE_DIR", d)
+    monkeypatch.setattr(esvigy, "in_use", set())  # keys marked in use belong to one test's cache
     return d
 
 

@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import html
 import json
+import math
 import os
 import re
 import secrets
@@ -267,6 +268,156 @@ def file_kind(name):
     return "tiff" if ext in TIFF_EXTS else "image"
 
 
+# ---------------------------------------------------------------- shrinking the thumbnail cache
+# A cache entry is a thumbnail <key>.webp and/or its metadata <key>.json. Keys change whenever a
+# file does, so old entries pile up. An entry's modification time records when it was last used
+# (its folder listed, or it was served), so the longest-unused ones can go first.
+
+CACHE_ENTRY_RE = re.compile(r"([0-9a-f]{24})\.(?:webp|json)")
+CACHE_TEMP_RE = re.compile(r"\.[0-9a-f]{24}\.(?:webp|json)\.\d+")  # an upload being written (see do_PUT)
+DAY = 86400
+TEMP_MAX_AGE = 3600  # older unfinished uploads were abandoned
+# Done in the background at every start: entries unused for 90 days go, and above 1 GB the
+# longest-unused ones, down to 800 MB.
+AUTO_MAX_AGE_DAYS = 90
+AUTO_MAX_BYTES = 1 << 30
+AUTO_TARGET_BYTES = 800 << 20
+
+
+# Keys listed or served since esvigy started: never removed while it runs (the cleanup at
+# startup works in the background while the first folder is listed). The lock makes marking and
+# removing take turns, so an entry is either marked first (and kept) or removed first (and then
+# reported missing, so the UI draws it again).
+cache_lock = threading.Lock()
+in_use = set()
+
+
+def mark_used(p):
+    """Record that cache file `p` is in use (on disk at most once a day, to keep writes rare).
+    Returns whether it exists."""
+    with cache_lock:
+        try:
+            st = p.stat()
+        except OSError:
+            return False
+        if m := CACHE_ENTRY_RE.fullmatch(p.name):
+            in_use.add(m.group(1))
+        if time.time() - st.st_mtime > DAY:
+            try:
+                os.utime(p)
+            except OSError:
+                pass
+        return True
+
+
+def cache_scan():
+    """esvigy's own files in the cache folder, and nothing else (no links, no folders, no other
+    names), as ({key: [(path, size, last used)]}, [(unfinished upload, mtime)])."""
+    entries, temps = {}, []
+    try:
+        listing = list(os.scandir(CACHE_DIR))
+    except OSError:
+        return entries, temps
+    for e in listing:
+        try:
+            if not e.is_file(follow_symlinks=False):
+                continue
+            m = CACHE_ENTRY_RE.fullmatch(e.name)
+            if m:
+                st = e.stat(follow_symlinks=False)
+                entries.setdefault(m.group(1), []).append((Path(e.path), st.st_size, st.st_mtime))
+            elif CACHE_TEMP_RE.fullmatch(e.name):
+                temps.append((Path(e.path), e.stat(follow_symlinks=False).st_mtime))
+        except OSError:
+            continue
+    return entries, temps
+
+
+def cache_info():
+    """(number of entries, bytes) in the cache."""
+    entries, _ = cache_scan()
+    return len(entries), sum(size for files in entries.values() for _, size, _ in files)
+
+
+def prune_cache(max_age_days=None, max_bytes=None, target_bytes=None, clear=False):
+    """Shrink the cache; returns (entries removed, bytes freed).
+
+    Removes entries unused for more than `max_age_days`, and then, if the rest is over
+    `max_bytes`, the longest-unused ones until it is at most `target_bytes` (default:
+    `max_bytes`). `clear` removes all. A thumbnail and its metadata always go together.
+    """
+    entries, temps = cache_scan()
+    now = time.time()
+    last_used = {k: max(t for *_, t in files) for k, files in entries.items()}
+    size = {k: sum(s for _, s, _ in files) for k, files in entries.items()}
+    if clear:
+        doomed = set(entries)
+    else:
+        doomed = set()
+        if max_age_days is not None:
+            doomed = {k for k, t in last_used.items() if now - t > max_age_days * DAY}
+        if max_bytes is not None:
+            total = sum(size[k] for k in entries if k not in doomed)
+            if total > max_bytes:
+                target = max_bytes if target_bytes is None else target_bytes
+                for k in sorted(set(entries) - doomed, key=last_used.get):  # longest unused first
+                    if total <= target:
+                        break
+                    if k in in_use:  # shown in this run: take the next one instead
+                        continue
+                    doomed.add(k)
+                    total -= size[k]
+    removed = freed = 0
+    for k in doomed:
+        gone = False
+        with cache_lock:
+            if k in in_use:  # listed or served since the scan above (or earlier in this run)
+                continue
+            for p, s, _ in entries[k]:
+                try:
+                    p.unlink()
+                except OSError:
+                    continue
+                freed += s
+                gone = True
+        removed += gone
+    for p, t in temps:
+        if clear or now - t > TEMP_MAX_AGE:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    return removed, freed
+
+
+def auto_prune_cache():
+    return prune_cache(max_age_days=AUTO_MAX_AGE_DAYS, max_bytes=AUTO_MAX_BYTES, target_bytes=AUTO_TARGET_BYTES)
+
+
+def days_arg(text):
+    """argparse type for --prune-cache: a finite number of days, 0 or more (a negative number
+    or nan would remove even thumbnails used a moment ago, like --clear-cache)."""
+    try:
+        v = float(text)
+    except ValueError:
+        v = math.nan
+    if not (math.isfinite(v) and v >= 0):
+        raise argparse.ArgumentTypeError(f"DAYS must be a number, 0 or more, not {text!r}")
+    return v
+
+
+def fmt_bytes(n):
+    for unit in ("B", "KB", "MB"):
+        if n < 1024:
+            return f"{n} B" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def thumbnails(n):
+    return f"{n} thumbnail" + ("" if n == 1 else "s")
+
+
 def folder_sig(d):
     """A short fingerprint of folder `d`: subfolder names and each document's name, modification
     time and size. It changes whenever a file is added, removed or rewritten, and costs only a
@@ -498,7 +649,7 @@ class Handler(BaseHTTPRequestHandler):
                     st = e.stat()
                     key = thumb_key(real, st)
                     f = {"name": e.name, "size": st.st_size, "mtime": st.st_mtime,
-                         "key": key, "thumb": (CACHE_DIR / f"{key}.webp").exists()}
+                         "key": key, "thumb": mark_used(CACHE_DIR / f"{key}.webp")}
                     kind = file_kind(e.name)
                     if kind == "pdf":
                         meta = read_meta(key)
@@ -607,10 +758,14 @@ class Handler(BaseHTTPRequestHandler):
         if not THUMB_NAME_RE.fullmatch(name):  # metadata is only delivered through the listing
             return self.fail(HTTPStatus.NOT_FOUND)
         p = CACHE_DIR / name
-        if not p.is_file():
+        if not mark_used(p):
+            return self.fail(HTTPStatus.NOT_FOUND)
+        try:
+            data = p.read_bytes()
+        except OSError:  # removed meanwhile (by hand, or by another esvigy's cleanup)
             return self.fail(HTTPStatus.NOT_FOUND)
         # Keys change whenever the source file changes, so thumbs are immutable.
-        self.send_bytes(p.read_bytes(), "image/webp", headers={"Cache-Control": "max-age=31536000, immutable"})
+        self.send_bytes(data, "image/webp", headers={"Cache-Control": "max-age=31536000, immutable"})
 
 
 # Native folder pickers. Each prints the chosen path and exits non-zero on cancel.
@@ -855,7 +1010,22 @@ def main():
                          "if Firefox is there; firefox: normal new Firefox window; default: system browser; "
                          "none: only print the URL")
     ap.add_argument("-v", "--verbose", action="store_true", help="log every request")
+    cache = ap.add_argument_group("thumbnail cache", f"{CACHE_DIR} (ESVIGY_CACHE to move it). Thumbnails "
+                                  f"unused for {AUTO_MAX_AGE_DAYS} days, and the longest-unused ones above "
+                                  f"{fmt_bytes(AUTO_MAX_BYTES)}, are removed automatically at every start.")
+    cache.add_argument("--cache", action="store_true", help="show the cache's size, then exit")
+    cache.add_argument("--prune-cache", nargs="?", const=30, type=days_arg, metavar="DAYS",
+                       help="remove thumbnails not used for DAYS days (default 30), then exit")
+    cache.add_argument("--clear-cache", action="store_true", help="remove all thumbnails, then exit")
     args = ap.parse_args()
+
+    if args.cache or args.clear_cache or args.prune_cache is not None:
+        if args.clear_cache or args.prune_cache is not None:
+            n, freed = prune_cache(clear=True) if args.clear_cache else prune_cache(max_age_days=args.prune_cache)
+            print(f"esvigy: removed {thumbnails(n)} ({fmt_bytes(freed)})")
+        n, size = cache_info()
+        print(f"esvigy: cache {CACHE_DIR}: {thumbnails(n)}, {fmt_bytes(size)}")
+        return
 
     target = Path(args.path).expanduser().resolve()
     if not target.exists():
@@ -863,6 +1033,13 @@ def main():
     root = target if target.is_dir() else target.parent
 
     server = make_server(root, args.port, args.verbose)
+
+    def startup_prune():
+        n, freed = auto_prune_cache()
+        if n:
+            print(f"esvigy: cache: removed {thumbnails(n)} not used for a while ({fmt_bytes(freed)})", flush=True)
+
+    threading.Thread(target=startup_prune, daemon=True).start()
     url = server.url
     if target.is_file():
         url += "#file=" + quote(target.name)
