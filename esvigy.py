@@ -267,6 +267,25 @@ def file_kind(name):
     return "tiff" if ext in TIFF_EXTS else "image"
 
 
+def folder_sig(d):
+    """A short fingerprint of folder `d`: subfolder names and each document's name, modification
+    time and size. It changes whenever a file is added, removed or rewritten, and costs only a
+    stat per entry (no file is read), so the UI can afford to ask for it every few seconds."""
+    h = hashlib.sha1()
+    for e in sorted(os.scandir(d), key=lambda e: e.name):
+        if e.name.startswith("."):
+            continue
+        try:
+            if e.is_dir():
+                h.update(b"d\0%s\0" % os.fsencode(e.name))
+            elif e.is_file() and e.name.lower().endswith(DOC_EXTS):
+                st = e.stat()
+                h.update(b"f\0%s\0%d\0%d\0" % (os.fsencode(e.name), st.st_mtime_ns, st.st_size))
+        except OSError:
+            continue
+    return h.hexdigest()[:16]
+
+
 def thumb_key(path, st):
     raw = f"{path}\0{st.st_mtime_ns}\0{st.st_size}".encode()
     return hashlib.sha1(raw).hexdigest()[:24]
@@ -359,6 +378,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.serve_static(path[len("/static/"):])
         if path == "/api/list":
             return self.api_list(query.get("dir", [""])[0], dirs_only="dirs" in query)
+        if path == "/api/sig":
+            return self.api_sig(query.get("dir", [""])[0])
         if path.startswith("/file/"):
             return self.serve_file(path[len("/file/"):], "fix" in query)
         if path.startswith("/thumb/"):
@@ -449,6 +470,13 @@ class Handler(BaseHTTPRequestHandler):
         d = self.resolve(root, rel)
         if d is None or not d.is_dir():
             return self.fail(HTTPStatus.NOT_FOUND)
+        sig = None
+        if not dirs_only:
+            try:
+                # Taken before the scan: a file that changes while we list is then noticed later.
+                sig = folder_sig(d)
+            except OSError:
+                pass
         dirs, files = [], []
         try:
             entries = list(os.scandir(d))
@@ -496,7 +524,17 @@ class Handler(BaseHTTPRequestHandler):
         rel_root = "" if d == root else d.relative_to(root).as_posix()
         # "path" (with the OS's separator) is only for the UI's copy-path buttons.
         self.send_json({"dir": rel_root, "root": root.name or str(root), "path": str(d), "sep": os.sep,
-                        "dirs": dirs, "files": files})
+                        "dirs": dirs, "files": files, "sig": sig})
+
+    def api_sig(self, rel):
+        """The folder's fingerprint (see folder_sig), polled by the UI to notice changed files."""
+        d = self.resolve(self.server.root, rel)
+        if d is None or not d.is_dir():
+            return self.fail(HTTPStatus.NOT_FOUND)
+        try:
+            self.send_json({"sig": folder_sig(d)})
+        except OSError:
+            self.fail(HTTPStatus.FORBIDDEN, "cannot read folder")
 
     def api_open(self):
         """Pick a folder with the desktop's native dialog and make it the new root."""

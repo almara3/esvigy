@@ -378,3 +378,50 @@ def test_folders_only_listing_reads_no_file(server, monkeypatch):
     d = server.get_json("/api/list?dirs&dir=")
     assert d["dirs"] == ["sub"] and d["files"] == []
     assert server.get_json("/api/list?dir=sub&dirs")["dirs"] == ["deeper"]
+
+
+# ---------------------------------------------------------------- noticing changed files
+
+def sig(server, d=""):
+    return server.get_json("/api/sig?dir=" + d)["sig"]
+
+
+def test_folder_sig_matches_listing_and_is_stable(server):
+    assert server.get_json("/api/list")["sig"] == sig(server) == sig(server)
+    assert server.get_json("/api/list?dirs")["sig"] is None  # the tree doesn't need it
+
+
+def test_folder_sig_changes_with_files(server):
+    s0 = sig(server)
+    p = server.root / "a.svg"
+    st = p.stat()
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))  # rewritten (same size)
+    s1 = sig(server)
+    (server.root / "new.svg").write_text("<svg/>")
+    s2 = sig(server)
+    (server.root / "new.svg").unlink()
+    (server.root / "newdir").mkdir()
+    s3 = sig(server)
+    assert len({s0, s1, s2, s3}) == 4
+
+
+def test_folder_sig_ignores_hidden_and_other_files(server):
+    s0 = sig(server)
+    (server.root / "notes2.txt").write_text("x")
+    (server.root / ".hidden2.svg").write_text("<svg/>")
+    assert sig(server) == s0
+
+
+def test_folder_sig_reads_no_file(server, monkeypatch):
+    def no_reading(*a, **k):
+        raise AssertionError("a file was read")
+
+    monkeypatch.setattr(esvigy, "read_head", no_reading)
+    assert sig(server)
+    assert server.request("GET", "/api/sig?dir=nope").status == 404
+    assert server.request("GET", "/api/sig?dir=..").status == 404
+
+
+def test_versioned_file_url(server):
+    r = server.request("GET", "/file/viewbox-only.svg?v=0123456789abcdef01234567&fix")
+    assert r.status == 200 and esvigy.svg_size(r.body)[2] is True  # `fix` still applies

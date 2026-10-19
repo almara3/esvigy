@@ -45,6 +45,10 @@ doesn't quit the browser, so quit it with Cmd+Q (or press Ctrl+C in the terminal
 - Thumbnails are rendered once by the browser in a hidden frame (its own process, so the UI never freezes), two at a time, visible ones first,
   and cached in `~/.cache/esvigy/thumbs` (keyed on path + mtime + size), so a
   folder you've seen before opens instantly
+- Files that change while shown (e.g. a plotting script re-run) are noticed within about 2 s:
+  their thumbnails are redrawn and the viewer reloads them, keeping zoom and page. esvigy checks
+  only names, modification times and sizes (no file is read), so a file replaced by one with the
+  same size and modification time (e.g. `cp -p`) isn't noticed, and keeps its old thumbnail.
 - Viewer shows the cached thumbnail immediately, then swaps in the full render
 - Pan (drag), zoom at cursor (wheel), double-click toggles fit / 100 %
 - **Compare**: Ctrl-click (Cmd-click on macOS) two thumbnails and press *Compare* (or `c`), or press `c` in the viewer.

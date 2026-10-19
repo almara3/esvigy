@@ -69,6 +69,9 @@ def app(request, tmp_path_factory):
     root = make_tree(base / "root")
     (root / "docs").mkdir()
     (root / "single").mkdir()
+    (root / "live").mkdir()
+    (root / "live" / "plot.svg").write_text(SMALL.format(w=200, h=100, c="teal"))
+    (root / "live" / "other.svg").write_text(SMALL.format(w=200, h=100, c="gold"))
     (root / "single" / "only.svg").write_text(SMALL.format(w=120, h=80, c="navy"))
     make_pdf(root / "docs" / "a4.pdf", [(595, 842, (0, .5, .5))])
     make_pdf(root / "docs" / "two.pdf", [(842, 595, (.8, .1, .1)), (595, 842, (0, 0, 1))])
@@ -966,3 +969,39 @@ def test_current_folder_can_be_folded(ui):
     ui.wait(visible)
     node.find_element(By.CSS_SELECTOR, ".twisty").click()  # the arrow works too
     ui.wait(lambda: not visible())
+
+
+
+# ---------------------------------------------------------------- files that change while shown
+
+def rewrite(path, colour):
+    """Change an SVG the way a plotting script does: new content, new modification time."""
+    old = path.stat().st_mtime_ns
+    path.write_text(SMALL.format(w=200, h=100, c=colour) + "<!-- %s -->" % colour)
+    os.utime(path, ns=(old + 2_000_000_000, old + 2_000_000_000))
+
+
+def test_changed_file_gets_a_new_thumbnail_while_shown(ui):
+    ui.d.get(ui.url + "#dir=live")
+    ui.wait(lambda: ui.card_names() == ["other.svg", "plot.svg"])
+    thumb = lambda name: ui.js("""
+        const c = [...document.querySelectorAll('.card')].find(c => c.querySelector('.name').textContent === arguments[0]);
+        return c.querySelector('img').getAttribute('src');""", name)
+    ui.wait(lambda: thumb("plot.svg") and thumb("other.svg"))
+    before, other = thumb("plot.svg"), thumb("other.svg")
+    ui.js("document.getElementById('grid').scrollTop = 0; window.__marker = 1")  # no page reload allowed
+    rewrite(ui.root / "live" / "plot.svg", "#%06x" % (int(time.time() * 1000) & 0xFFFFFF))
+    ui.wait(lambda: thumb("plot.svg") not in (None, before), timeout=15)
+    assert thumb("other.svg") == other  # unchanged files keep theirs
+    assert ui.js("return window.__marker") == 1
+
+
+def test_changed_file_reloads_in_the_viewer(ui):
+    ui.d.get(ui.url + "#dir=live&file=plot.svg")
+    ui.wait(lambda: ui.by_id("v-time").text.endswith("ms"))
+    src = lambda: ui.js("return document.querySelector('.pane:not([hidden]) img.img').getAttribute('src')")
+    before = src()
+    rewrite(ui.root / "live" / "plot.svg", "#%06x" % (int(time.time() * 1000 + 7) & 0xFFFFFF))
+    ui.wait(lambda: src() not in (None, before), timeout=15)
+    ui.wait(lambda: ui.by_id("v-time").text.endswith("ms"))
+    assert ui.by_id("v-name").text == "plot.svg"

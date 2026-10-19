@@ -13,7 +13,8 @@ const el = (tag, cls, text) => {
 };
 const joinPath = (dir, name) => (dir ? dir + "/" + name : name);
 const encPath = (p) => p.split("/").map(encodeURIComponent).join("/");
-const fileUrl = (dir, f, fix) => BASE + "file/" + encPath(joinPath(dir, f.name)) + (fix ? "?fix" : "");
+// `v` (the file's cache key, which changes with the file) keeps the browser from showing a stale copy.
+const fileUrl = (dir, f, fix) => BASE + "file/" + encPath(joinPath(dir, f.name)) + "?v=" + f.key + (fix ? "&fix" : "");
 const thumbUrl = (f) => BASE + "thumb/" + f.key + ".webp";
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -92,6 +93,7 @@ const state = {
   view: [],         // files after filter
   current: -1,      // index into view while the viewer is open
   cmp: -1,          // index of the comparison file (compare mode), else -1
+  sig: null,        // fingerprint of `dir` when it was listed (see checkFolder)
   path: "", sep: "/",  // absolute path of dir and the OS's separator (for copying paths)
   openedByPush: false,
 };
@@ -333,6 +335,7 @@ async function loadDir(dir) {
   state.sep = data.sep;
   $("copy-path").hidden = false;
   state.files = data.files;
+  state.sig = data.sig;
   sortFiles();
   renderGrid();
 }
@@ -478,6 +481,89 @@ grid.addEventListener("keydown", (e) => {
   target?.focus();
   target?.scrollIntoView({ block: "nearest" });
 });
+
+// ---------------------------------------------------------------- files that change while shown
+// Every few seconds, ask for the folder's fingerprint (names, modification times, sizes; no file
+// is read). If it changed, list the folder again and refresh only what changed: new thumbnails,
+// and the viewer reloads a file it shows, keeping zoom and page.
+
+const WATCH_MS = 2000;
+let watching = false;
+
+async function checkFolder() {
+  const dir = state.dir;
+  if (dir === null || !state.sig || document.hidden || watching) return;
+  watching = true;
+  try {
+    const r = await fetch(BASE + "api/sig?dir=" + encodeURIComponent(dir));
+    if (!r.ok || state.dir !== dir) return;
+    const { sig } = await r.json();
+    if (sig && sig !== state.sig) await reloadFolder(dir);
+  } catch (e) {
+    console.warn("folder check failed", e);
+  } finally {
+    watching = false;
+  }
+}
+setInterval(checkFolder, WATCH_MS);
+document.addEventListener("visibilitychange", checkFolder);
+
+async function reloadFolder(dir) {
+  listCache.delete(dir);
+  const data = await list(dir);
+  if (state.dir !== dir) return;
+  state.sig = data.sig;
+  const node = treeNodes.get(dir);  // subfolders may have come or gone
+  if (node) {
+    node.loaded = false;
+    dirCache.delete(dir);
+    if (node.open) expand(dir);
+  }
+  const old = new Map(state.files.map((f) => [f.name, f]));
+  if (data.files.length !== old.size || !data.files.every((f) => old.has(f.name))) {
+    // Files added or removed: rebuild, keeping the scroll position and what the viewer shows.
+    const top = grid.scrollTop;
+    state.files = data.files;
+    sortFiles();
+    renderGrid();
+    grid.scrollTop = top;
+    if (!viewer.hidden) route();
+    return;
+  }
+  for (const nf of data.files) {
+    const f = old.get(nf.name);
+    if (f.key === nf.key) continue;
+    Object.assign(f, nf);  // the same object: its card, sidebar row and panes stay attached
+    refreshFile(f);
+  }
+}
+
+function refreshFile(f) {
+  const card = cards.get(f);
+  if (card) {
+    const img = card.querySelector("img");
+    img.removeAttribute("src");
+    card.querySelector(".pic .note")?.remove();
+    card.querySelector(".dims").textContent = fmtDims(f);
+    card.querySelector(".size").textContent = fmtSize(f.size);
+    card.querySelector(".date").textContent = fmtDate(f.mtime);
+    // A card already in view gets no new visibility event, so queue it here.
+    const r = card.getBoundingClientRect(), g = grid.getBoundingClientRect();
+    if (f.thumb) img.src = thumbUrl(f);
+    else if (r.bottom > g.top - 400 && r.top < g.bottom + 400) thumbs.add(f);
+  }
+  const mini = sideRows.get(f)?.querySelector(".mini");
+  if (mini) {
+    mini.removeAttribute("src");
+    if (f.thumb) mini.src = thumbUrl(f);
+  }
+  for (const p of active()) {
+    if (p.f !== f) continue;
+    p.setFile(f, p.pageNo);  // keeps the pane's zoom and position
+    if (p.fitted) fitGroup(p);
+    else p.commit();
+  }
+}
 
 // ---------------------------------------------------------------- thumbnails
 // Cached thumbs load straight from disk. Missing ones are rendered by the browser
