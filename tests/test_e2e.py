@@ -1005,3 +1005,13 @@ def test_changed_file_reloads_in_the_viewer(ui):
     ui.wait(lambda: src() not in (None, before), timeout=15)
     ui.wait(lambda: ui.by_id("v-time").text.endswith("ms"))
     assert ui.by_id("v-name").text == "plot.svg"
+
+
+def test_shift_click_in_the_sidebar_selects_no_text(ui):
+    ui.d.get(ui.url + "#file=a.svg&vs=b.svg")
+    ui.wait(lambda: ui.visible_panes() == 2 and side_files(ui))
+    ui.js("getSelection().removeAllRanges()")
+    side_row(ui, "a.svg").click()
+    ActionChains(ui.d).key_down(Keys.SHIFT).click(side_row(ui, "viewbox-only.svg")).key_up(Keys.SHIFT).perform()
+    ui.wait(lambda: ui.by_id("v-name").text.startswith("viewbox-only.svg"))  # Shift+click still works
+    assert ui.js("return getSelection().toString()") == ""

@@ -76,7 +76,8 @@ body.no-side #side { display: none; }
   color: inherit;
   font: inherit;
 }
-#tree { flex: 1; overflow: auto; padding-bottom: 20px; }
+/* No text selection: Shift+click (side A in compare mode) would select the names in between. */
+#tree { flex: 1; overflow: auto; padding-bottom: 20px; user-select: none; }
 #tree ul { list-style: none; margin: 0; padding: 0 0 0 12px; }
 #tree > ul { padding-left: 4px; }
 #tree .row {
