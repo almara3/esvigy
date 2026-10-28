@@ -14,7 +14,7 @@ const el = (tag, cls, text) => {
 const joinPath = (dir, name) => (dir ? dir + "/" + name : name);
 const encPath = (p) => p.split("/").map(encodeURIComponent).join("/");
 // `v` (the file's cache key, which changes with the file) keeps the browser from showing a stale copy.
-const fileUrl = (dir, f, fix) => BASE + "file/" + encPath(joinPath(dir, f.name)) + "?v=" + f.key + (fix ? "&fix" : "");
+const fileUrl = (f, fix) => BASE + "file/" + encPath(joinPath(f.dir, f.name)) + "?v=" + f.key + (fix ? "&fix" : "");
 const thumbUrl = (f) => BASE + "thumb/" + f.key + ".webp";
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -58,12 +58,18 @@ const prefs = {
 
 // ---------------------------------------------------------------- data
 
+// Each file remembers its folder (`f.dir`), as files of several folders can be shown at once.
 const listCache = new Map();
+const absPaths = new Map();  // folder -> its absolute path (for copying paths)
 function list(dir) {
   if (!listCache.has(dir)) {
     const p = fetch(BASE + "api/list?dir=" + encodeURIComponent(dir)).then((r) => {
       if (!r.ok) throw new Error(r.status + " " + r.statusText);
       return r.json();
+    }).then((data) => {
+      for (const f of data.files) f.dir = dir;
+      absPaths.set(dir, data.path);
+      return data;
     });
     p.catch(() => listCache.delete(dir));
     listCache.set(dir, p);
@@ -92,27 +98,29 @@ const state = {
   files: [],        // all SVGs in dir (sorted)
   view: [],         // files after filter
   current: -1,      // index into view while the viewer is open
-  cmp: -1,          // index of the comparison file (compare mode), else -1
+  cmp: -1,          // index into bview of the comparison file (compare mode), else -1
+  bview: [],        // the files pane B steps through: `view`, or those of another folder
   sig: null,        // fingerprint of `dir` when it was listed (see checkFolder)
   path: "", sep: "/",  // absolute path of dir and the OS's separator (for copying paths)
   openedByPush: false,
 };
 
 // ---------------------------------------------------------------- routing
-// URL hash: #dir=<path>&file=<name>[&vs=<name>][&page=<n>][&vspage=<n>]. Opening a file
-// pushes history, so Back closes it.
+// URL hash: #dir=<path>&file=<name>[&vs=<name>[&vsdir=<path>]][&page=<n>][&vspage=<n>]. `vsdir` is
+// the comparison file's folder if it isn't `dir`. Opening a file pushes history, so Back closes it.
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
   const page = (k) => Math.max(1, parseInt(p.get(k), 10) || 1);
-  return { dir: p.get("dir") || "", file: p.get("file"), vs: p.get("vs"),
+  return { dir: p.get("dir") || "", file: p.get("file"), vs: p.get("vs"), vsdir: p.get("vsdir"),
            page: page("page"), vspage: page("vspage") };
 }
-function writeHash(dir, file, push, vs, page = 1, vspage = 1) {
+function writeHash(dir, file, push, vs, page = 1, vspage = 1, vsdir = dir) {
   const p = new URLSearchParams();
   if (dir) p.set("dir", dir);
   if (file) p.set("file", file);
   if (file && vs) p.set("vs", vs);
+  if (file && vs && vsdir !== dir) p.set("vsdir", vsdir);
   if (file && page > 1) p.set("page", page);
   if (file && vs && vspage > 1) p.set("vspage", vspage);
   const h = "#" + p.toString().replace(/\+/g, "%20");
@@ -123,22 +131,29 @@ function writeHash(dir, file, push, vs, page = 1, vspage = 1) {
 let routeToken = 0;
 async function route() {
   const token = ++routeToken;
-  const { dir, file, vs, page, vspage } = readHash();
+  const { dir, file, vs, vsdir, page, vspage } = readHash();
   if (dir !== state.dir) {
     closeViewer();
     await loadDir(dir);
     if (token !== routeToken) return;
   }
+  let bview = state.view;
+  if (file && vs && vsdir !== null && vsdir !== dir) {
+    try { bview = shownFiles((await list(vsdir)).files); } catch { bview = []; }
+    if (token !== routeToken) return;
+  }
   const i = file ? state.view.findIndex((f) => f.name === file) : -1;
-  const j = vs ? state.view.findIndex((f) => f.name === vs) : -1;
-  if (i >= 0) openViewer(i, j, page, vspage);
+  const j = vs ? bview.findIndex((f) => f.name === vs) : -1;
+  if (i >= 0) openViewer(i, j, page, vspage, bview);
   else closeViewer();
 }
 window.addEventListener("hashchange", route);
 
 // ---------------------------------------------------------------- folder tree
 
-const treeNodes = new Map(); // path -> {li, row, ul, loaded, open}
+// A folder the user opened (by showing it, or with its arrow) lists its files too (`withFiles`),
+// so files of several folders can be compared; parents opened only to show the way don't.
+const treeNodes = new Map(); // path -> {li, row, ul, loaded, open, withFiles, data}
 
 function makeNode(path, name) {
   const li = el("li", "closed");
@@ -148,16 +163,17 @@ function makeNode(path, name) {
   row.title = path || name;
   const ul = el("ul");
   li.append(row, ul);
-  const node = { li, row, ul, twisty, loaded: false, open: false, hasDirs: null };
+  const node = { path, li, row, ul, twisty, loaded: false, open: false, hasDirs: null,
+                 withFiles: false, data: null, filesUl: null, shown: [] };
   treeNodes.set(path, node);
   // A click opens the folder; on the folder already shown it folds it (and its files) away.
   row.addEventListener("click", () => {
     if (path !== state.dir) writeHash(path, null, true);
-    else node.open ? collapse(path) : expand(path);
+    else node.open ? collapse(path) : expand(path, true);
   });
   twisty.addEventListener("click", (e) => {
     e.stopPropagation();
-    node.open ? collapse(path) : expand(path);
+    node.open ? collapse(path) : expand(path, true);
   });
   return node;
 }
@@ -182,19 +198,21 @@ function showOpen(node) {
   updateTwisty(node);
 }
 
-// A folder can be folded if it has subfolders or (the current one) files; unknown counts as yes.
+// A folder can be folded if it has subfolders or listed files; unknown counts as yes.
 function updateTwisty(node) {
-  const files = node.li.querySelector(":scope > ul.files > li");
-  node.twisty.style.visibility = node.hasDirs === false && !files ? "hidden" : "";
+  node.twisty.style.visibility = node.hasDirs === false && !node.shown.length ? "hidden" : "";
 }
 
-async function expand(path) {
+// Open a folder in the tree, loading its subfolders and, if `withFiles`, its files.
+async function expand(path, withFiles = false) {
   const node = treeNodes.get(path);
   if (!node) return;
-  if (!node.loaded) {
+  if (withFiles) node.withFiles = true;
+  if (!node.loaded || (node.withFiles && !node.data)) {
     let data;
-    try { data = await listDirs(path); } catch { return; }
+    try { data = await (node.withFiles ? list(path) : listDirs(path)); } catch { return; }
     node.loaded = true;
+    if (node.withFiles) node.data ??= data;
     const dirs = data.dirs.slice().sort(collator.compare);
     // Reuse nodes that exist already (the path to the current folder), so their files stay.
     node.ul.replaceChildren(...dirs.map((d) => {
@@ -202,6 +220,7 @@ async function expand(path) {
       return (treeNodes.get(p) ?? makeNode(p, d)).li;
     }));
     node.hasDirs = dirs.length > 0;
+    renderNodeFiles(node);
   }
   showOpen(node);
 }
@@ -227,47 +246,58 @@ async function revealInTree(dir) {
 }
 
 // ---------------------------------------------------------------- files in the sidebar
-// The current folder's files, one line each with a tiny thumbnail, listed under its tree node
-// (after its subfolders, in their own list, so loading subfolders can't wipe them).
+// The files of each folder opened with them, one line each with a tiny thumbnail, listed under its
+// tree node (after its subfolders, in their own list, so loading subfolders can't wipe them).
+// They are sorted and filtered like the grid.
 
 const sideRows = new Map(); // file object -> row
-let sideList = null;
 
 const sideObserver = new IntersectionObserver((entries) => {
   for (const e of entries) {
+    const f = e.target._file;
     const mini = e.target.querySelector(".mini");
-    if (e.isIntersecting && e.target._file.thumb && !mini.hasAttribute("src")) mini.src = thumbUrl(e.target._file);
+    if (!e.isIntersecting) { if (f.dir !== state.dir) thumbs.remove(f); continue; }
+    if (mini.hasAttribute("src")) continue;
+    if (f.thumb) mini.src = thumbUrl(f);
+    else if (f.dir !== state.dir) thumbs.add(f);  // the current folder's are made for the grid
   }
 }, { root: $("tree"), rootMargin: "200px 0px" });
 
-function renderSideFiles() {
-  sideList?.remove();
-  sideList = null;
-  sideRows.clear();
-  sideObserver.disconnect();
-  const node = treeNodes.get(state.dir);
-  if (!node) return;  // loadDir() builds it (revealInTree) before the grid is rendered
-  const ul = el("ul", "files");
-  for (const f of state.view) {
-    const row = el("div", "row file");
-    const mini = el("img", "mini");
-    mini.alt = "";
-    mini.decoding = "async";
-    row.append(el("span", "twisty"), mini, el("span", "label", f.name), el("span", "ab"));
-    row._file = f;
-    const li = el("li");
-    li.append(row);
-    ul.append(li);
-    sideRows.set(f, row);
+function renderNodeFiles(node) {
+  for (const f of node.shown) {
+    sideObserver.unobserve(sideRows.get(f));
+    sideRows.delete(f);
   }
-  node.li.append(ul);
-  sideList = ul;
+  node.filesUl?.remove();
+  node.filesUl = null;
+  node.shown = node.withFiles && node.data ? shownFiles(node.data.files) : [];
+  if (node.shown.length) {
+    const ul = el("ul", "files");
+    for (const f of node.shown) {
+      const row = el("div", "row file");
+      const mini = el("img", "mini");
+      mini.alt = "";
+      mini.decoding = "async";
+      row.append(el("span", "twisty"), mini, el("span", "label", f.name), el("span", "ab"));
+      row._file = f;
+      const li = el("li");
+      li.append(row);
+      ul.append(li);
+      sideRows.set(f, row);
+      sideObserver.observe(row);
+    }
+    node.li.append(ul);
+    node.filesUl = ul;
+  }
   updateTwisty(node);
-  for (const row of sideRows.values()) sideObserver.observe(row);
   markSideFiles(false);
 }
 
-// A thumbnail was just made for `f` (the grid does that): show it in the sidebar too.
+function renderSideFiles() {
+  for (const node of treeNodes.values()) if (node.withFiles) renderNodeFiles(node);
+}
+
+// A thumbnail was just made for `f`: show it in the sidebar too.
 function setSideThumb(f, src) {
   const mini = sideRows.get(f)?.querySelector(".mini");
   if (mini) mini.src = src;
@@ -276,7 +306,7 @@ function setSideThumb(f, src) {
 // Highlight the file(s) open in the viewer; in compare mode mark which side shows which.
 function markSideFiles(scroll = true) {
   const a = viewer.hidden ? null : state.view[state.current];
-  const b = viewer.hidden || state.cmp < 0 ? null : state.view[state.cmp];
+  const b = viewer.hidden || state.cmp < 0 ? null : state.bview[state.cmp];
   for (const [f, row] of sideRows) {
     row.classList.toggle("cur", f === a || f === b);
     row.querySelector(".ab").textContent = b ? [f === a && "A", f === b && "B"].filter(Boolean).join(" ") : "";
@@ -292,16 +322,17 @@ $("tree").addEventListener("mouseover", (e) => {  // full name on hover, with wh
 $("tree").addEventListener("click", (e) => {
   const row = e.target.closest(".row.file");
   if (!row) return;
-  const i = state.view.indexOf(row._file);
-  if (i < 0) return;
+  const f = row._file;
   if (state.cmp >= 0 && !viewer.hidden) {
-    // compare: click shows the file on side B, Shift+click on side A; the other side keeps its page
+    // compare: click shows the file on side B, Shift+click on side A (a file of another folder
+    // there makes that folder the current one); the other side keeps its page
     const [pa, pb] = [panes[0].pageNo, panes[1].pageNo];
-    return e.shiftKey ? go(i, state.cmp, 1, pb) : go(state.current, i, pa, 1);
+    const fa = state.view[state.current], fb = state.bview[state.cmp];
+    return e.shiftKey ? show(f, fb, 1, pb) : show(fa, f, pa, 1);
   }
-  if (!viewer.hidden) return go(i, -1);  // like stepping: no new history entry
+  if (!viewer.hidden) return show(f, null);  // like stepping: no new history entry
   state.openedByPush = true;
-  writeHash(state.dir, row._file.name, true);
+  writeHash(f.dir, f.name, true);
 });
 
 // ---------------------------------------------------------------- grid
@@ -330,6 +361,7 @@ async function loadDir(dir) {
     document.title = "esvigy — " + data.root;
   }
   revealInTree(dir);  // builds the path to `dir` at once, so renderGrid() can list its files there
+  Object.assign(treeNodes.get(dir), { withFiles: true, data });
   renderCrumbs(dir, data.root);
   state.path = data.path;
   state.sep = data.sep;
@@ -341,15 +373,25 @@ async function loadDir(dir) {
 }
 
 let sortRev = prefs.get("rev", "0") === "1";
-function sortFiles() {
-  const key = $("sort").value;
+function sortList(files) {
   const cmp = {
     name: (a, b) => collator.compare(a.name, b.name),
     size: (a, b) => b.size - a.size,
     mtime: (a, b) => b.mtime - a.mtime,
-  }[key];
-  state.files.sort(cmp);
-  if (sortRev) state.files.reverse();
+  }[$("sort").value];
+  files.sort(cmp);
+  if (sortRev) files.reverse();
+  return files;
+}
+// A folder's files as shown: sorted, and filtered by the filter box.
+function shownFiles(files) {
+  const q = $("filter").value.trim().toLowerCase();
+  sortList(files);
+  return q ? files.filter((f) => f.name.toLowerCase().includes(q)) : files.slice();
+}
+function sortFiles() {
+  const key = $("sort").value;
+  sortList(state.files);
   // Mark the active column; the arrow shows the visible direction.
   const asc = (key === "name") !== sortRev;
   document.querySelectorAll("#thead [data-sort]").forEach((b) => {
@@ -400,16 +442,15 @@ async function copyPath(btn, paths) {
     btn._title = undefined;
   }, unsafe ? 4000 : 1200);
 }
-const filePath = (f) => state.path.replace(/[\\/]$/, "") + state.sep + f.name;
+const filePath = (f) => absPaths.get(f.dir).replace(/[\\/]$/, "") + state.sep + f.name;
 $("copy-path").addEventListener("click", (e) => copyPath(e.currentTarget, [state.path]));
 $("v-copy").addEventListener("click", (e) => {
-  const files = state.cmp >= 0 ? [state.view[state.current], state.view[state.cmp]] : [state.view[state.current]];
+  const files = state.cmp >= 0 ? [state.view[state.current], state.bview[state.cmp]] : [state.view[state.current]];
   copyPath(e.currentTarget, files.map(filePath));
 });
 
 function renderGrid() {
-  const q = $("filter").value.trim().toLowerCase();
-  state.view = q ? state.files.filter((f) => f.name.toLowerCase().includes(q)) : state.files.slice();
+  state.view = shownFiles(state.files);
   observer.disconnect();
   thumbs.clear();
   cards.clear();
@@ -524,6 +565,7 @@ async function reloadFolder(dir) {
     // Files added or removed: rebuild, keeping the scroll position and what the viewer shows.
     const top = grid.scrollTop;
     state.files = data.files;
+    if (node) node.data = data;
     sortFiles();
     renderGrid();
     grid.scrollTop = top;
@@ -602,8 +644,7 @@ const thumbs = {
       const f = this.pending.values().next().value;
       this.pending.delete(f);
       this.running++;
-      const gen = this.generation, dir = state.dir;
-      renderThumb(f, dir, gen).finally(() => {
+      renderThumb(f, this.generation).finally(() => {
         this.running--;
         this.pump();
       });
@@ -647,11 +688,11 @@ const renderer = {
   },
 };
 
-async function renderThumb(f, dir, gen) {
+async function renderThumb(f, gen) {
   const card = cards.get(f);
   card?.classList.add("busy");
   try {
-    const r = await renderer.render({ url: fileUrl(dir, f, !f.intrinsic), kind: f.kind, key: f.key,
+    const r = await renderer.render({ url: fileUrl(f, !f.intrinsic), kind: f.kind, key: f.key,
                                       w: f.w, h: f.h, max: THUMB_PX });
     updateMeta(f, r.meta);
     if (r.error) throw new Error(r.error);
@@ -744,13 +785,13 @@ class Pane {
     const token = ++this.token;
     const t0 = performance.now();
     this.timeEl = el("span");
-    this.info.replaceChildren(el("b", null, f.name), el("span", null, fmtDims(f) + " · " + fmtSize(f.size)),
+    this.info.replaceChildren(el("b", null, fileLabel(f)), el("span", null, fmtDims(f) + " · " + fmtSize(f.size)),
                               this.timeEl);
     $("v-time").textContent = "";
 
     // Show the (blurry) thumbnail instantly, then swap in the real render.
-    const cardImg = cards.get(f)?.querySelector("img");
-    this.thumb.src = cardImg?.getAttribute("src") || (f.thumb ? thumbUrl(f) : "");
+    const shown = (cards.get(f)?.querySelector("img") ?? sideRows.get(f)?.querySelector(".mini"))?.getAttribute("src");
+    this.thumb.src = shown || (f.thumb ? thumbUrl(f) : "");
     this.thumb.hidden = !this.thumb.getAttribute("src");
     this.img.classList.remove("ready");
     this.img.removeAttribute("src");
@@ -777,7 +818,7 @@ class Pane {
     };
     if (paged) return this.openPdf(token, done).catch(failed);
 
-    this.img.src = fileUrl(state.dir, f);
+    this.img.src = fileUrl(f);
     this.img.decode().then(() => {
       if (token !== this.token) return;
       if (f.kind === "image") this.fixSize(this.img.naturalWidth, this.img.naturalHeight, 1);
@@ -809,7 +850,7 @@ class Pane {
   async openPdf(token, done) {
     const f = this.f;
     const docs = docsFor(f);
-    const doc = await docs.open(fileUrl(state.dir, f));
+    const doc = await docs.open(fileUrl(f));
     if (token !== this.token) return doc.loadingTask.destroy();
     this.doc = doc;
     this.docs = docs;
@@ -1018,7 +1059,11 @@ function place(p, f, page = 1) {
   else p.fit();
 }
 
-function openViewer(i, j = -1, page = 1, vspage = 1) {
+// A file of another folder than the current one is named by its path in the opened folder.
+const fileLabel = (f) => (f.dir === state.dir ? f.name : "/" + joinPath(f.dir, f.name));
+
+// Show file `i` of the view, compared (if j >= 0) with file `j` of `bview`.
+function openViewer(i, j = -1, page = 1, vspage = 1, bview = state.view) {
   const compare = j >= 0;
   viewer.hidden = false;
   viewer.classList.toggle("compare", compare);
@@ -1026,18 +1071,20 @@ function openViewer(i, j = -1, page = 1, vspage = 1) {
   thumbs.pause(true);
   state.current = i;
   state.cmp = j;
+  state.bview = bview;
   ensurePanes(compare ? 2 : 1);
   place(panes[0], state.view[i], page);
-  if (compare) place(panes[1], state.view[j], vspage);
+  if (compare) place(panes[1], bview[j], vspage);
 
-  const n = state.view.length, fa = state.view[i], fb = state.view[j];
-  $("v-name").textContent = compare ? fa.name + "  ⇄  " + fb.name : fa.name;
+  const n = state.view.length, fa = state.view[i], fb = bview[j];
+  $("v-name").textContent = compare ? fa.name + "  ⇄  " + fileLabel(fb) : fa.name;
   const copyTitle = compare ? "Copy both files' full paths (one per line)" : "Copy the file's full path";
   if ($("v-copy")._title === undefined) $("v-copy").title = copyTitle;
   else $("v-copy")._title = copyTitle;  // showing "not copied" right now: the new title comes after
   $("v-info").textContent = compare ? "" : fmtDims(fa) + " · " + fmtSize(fa.size);
-  $("v-pos").textContent = compare ? `A ${i + 1} · B ${j + 1} / ${n}` : i + 1 + " / " + n;
-  $("v-raw").href = fileUrl(state.dir, fa);
+  $("v-pos").textContent = !compare ? i + 1 + " / " + n
+    : bview === state.view ? `A ${i + 1} · B ${j + 1} / ${n}` : `A ${i + 1} / ${n} · B ${j + 1} / ${bview.length}`;
+  $("v-raw").href = fileUrl(fa);
   $("v-cmp").classList.toggle("on", compare);
   $("v-link").classList.toggle("on", cmp.link);
   showZoom();
@@ -1048,7 +1095,7 @@ function prefetch(i) {
   const f = state.view[i];
   if (!f || isPaged(f) || f.size > 64 * 1024 * 1024) return;
   const img = new Image();
-  img.src = fileUrl(state.dir, f);
+  img.src = fileUrl(f);
 }
 
 function closeViewer() {
@@ -1069,9 +1116,14 @@ function leaveViewer() {
   else writeHash(state.dir, null, false);
 }
 
-// Show the viewer state in the URL. `b` is the comparison file index or -1; pa/pb are pages.
+// Show the viewer state in the URL: file `fa` (its folder becomes the current one), compared with
+// `fb` (any folder) unless that is null; pa/pb are pages.
+function show(fa, fb, pa = 1, pb = 1) {
+  writeHash(fa.dir, fa.name, false, fb?.name, pa, pb, fb?.dir);
+}
+// The same by index: `a` into the view, `b` into bview (or -1).
 function go(a, b, pa = 1, pb = 1) {
-  writeHash(state.dir, state.view[a].name, false, b >= 0 ? state.view[b].name : null, pa, pb);
+  show(state.view[a], b >= 0 ? state.bview[b] : null, pa, pb);
 }
 
 // Turn pages in pane `which` (0 or 1) or in every multi-page PDF shown ("both").
@@ -1094,13 +1146,14 @@ function pageKey(d) {
 // Step which file is shown. In compare mode `which` picks pane 0 (A), 1 (B) or "both";
 // both may show the same file, e.g. to compare two parts of one figure.
 function step(d, which = 0) {
-  const n = state.view.length;
+  const n = state.view.length, m = state.bview.length;
   if (!n) return;
-  if (state.cmp < 0) return go((state.current + d + n) % n, -1);
-  if (which === "both") return go((state.current + d + n) % n, (state.cmp + d + n) % n);
-  const a = state.current, b = state.cmp;
-  if (which) go(a, (b + d + n) % n);
-  else go((a + d + n) % n, b);
+  const a = (state.current + d + n) % n;
+  if (state.cmp < 0) return go(a, -1);
+  const b = (state.cmp + d + m) % m;
+  if (which === "both") return go(a, b);
+  if (which) go(state.current, b);
+  else go(a, state.cmp);
 }
 
 function toggleCompare() {
@@ -1208,6 +1261,8 @@ function refresh() {
   listCache.clear();
   dirCache.clear();
   treeNodes.clear();
+  sideRows.clear();
+  sideObserver.disconnect();
   $("tree").replaceChildren();
   state.dir = null;
   route();

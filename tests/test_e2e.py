@@ -874,14 +874,67 @@ def side_row(ui, name):
                 if r.find_element(By.CSS_SELECTOR, ".label").get_attribute("textContent") == name)
 
 
-def test_sidebar_lists_the_current_folders_files_only(ui):
+def files_in(ui, folder):
+    return [n for n, f, *_ in side_files(ui) if f == folder]
+
+
+def test_sidebar_lists_the_files_of_each_folder_shown(ui):
     ui.wait(lambda: [n for n, *_ in side_files(ui)] == ui.card_names())
     assert {folder for _, folder, *_ in side_files(ui)} == {"root"}
     ui.d.get(ui.url + "#dir=sub")
-    ui.wait(lambda: [n for n, *_ in side_files(ui)] == ["mm.svg", "zipped.svgz"])
-    assert {folder for _, folder, *_ in side_files(ui)} == {"sub"}  # root's files are gone
-    ui.by_id("filter").send_keys("zip")
+    ui.wait(lambda: files_in(ui, "sub") == ["mm.svg", "zipped.svgz"])
+    assert files_in(ui, "root") == ["a.svg", "b.svg", "viewbox-only.svg"]  # still there, to compare with
+    ui.by_id("filter").send_keys("zip")  # filters every folder's list
     ui.wait(lambda: [n for n, *_ in side_files(ui)] == ["zipped.svgz"])
+
+
+def tree_node(ui, name):
+    return next(r for r in ui.d.find_elements(By.CSS_SELECTOR, "#tree .row:not(.file)")
+                if r.find_element(By.CSS_SELECTOR, ".label").get_attribute("textContent") == name)
+
+
+def test_folder_opened_with_its_arrow_lists_its_files(ui):
+    tree_node(ui, "single").find_element(By.CSS_SELECTOR, ".twisty").click()  # no subfolders, one file
+    ui.wait(lambda: files_in(ui, "single") == ["only.svg"])
+    assert "dir=single" not in ui.hash()  # the grid stays where it was
+    assert tree_node(ui, "single").find_element(By.CSS_SELECTOR, ".twisty") \
+        .value_of_css_property("visibility") == "visible"
+    side_row(ui, "only.svg").click()  # opens it, in its folder
+    ui.wait(lambda: ui.viewer_open() and ui.by_id("v-name").text == "only.svg")
+    assert "dir=single" in ui.hash()
+
+
+def test_compare_files_of_different_folders(ui):
+    ui.d.get(ui.url + "#file=a.svg&vs=b.svg")
+    ui.wait(lambda: ui.visible_panes() == 2 and side_files(ui))
+    tree_node(ui, "sub").find_element(By.CSS_SELECTOR, ".twisty").click()
+    ui.wait(lambda: files_in(ui, "sub") == ["mm.svg", "zipped.svgz"])
+    side_row(ui, "mm.svg").click()  # side B, from another folder
+    ui.wait(lambda: ui.by_id("v-name").text == "a.svg ⇄ /sub/mm.svg")
+    assert "vsdir=sub" in ui.hash() and "dir=" not in ui.hash().replace("vsdir=", "")
+    assert ui.by_id("v-pos").text == "A 1 / 3 · B 1 / 2"
+    marks = lambda: {n: ab for n, _, _, ab in side_files(ui) if ab}
+    assert marks() == {"a.svg": "A", "mm.svg": "B"}
+    ui.keys(Keys.ARROW_RIGHT)  # B steps through its own folder
+    ui.wait(lambda: ui.by_id("v-name").text == "a.svg ⇄ /sub/zipped.svgz")
+    ActionChains(ui.d).key_down(Keys.SHIFT).send_keys(Keys.ARROW_RIGHT).key_up(Keys.SHIFT).perform()  # A: its folder
+    ui.wait(lambda: ui.by_id("v-name").text == "b.svg ⇄ /sub/zipped.svgz")
+    ui.keys(Keys.ESCAPE)
+    ui.wait(lambda: not ui.viewer_open())
+
+    # Shift+click a file of another folder: side A, and that folder becomes the current one
+    ui.d.get(ui.url + "#file=a.svg&vs=b.svg")
+    ui.wait(lambda: ui.visible_panes() == 2 and files_in(ui, "sub"))
+    ActionChains(ui.d).key_down(Keys.SHIFT).click(side_row(ui, "mm.svg")).key_up(Keys.SHIFT).perform()
+    ui.wait(lambda: ui.by_id("v-name").text == "mm.svg ⇄ /b.svg")
+    assert "dir=sub" in ui.hash() and "vsdir=&" in ui.hash() + "&"
+    assert ui.card_names() == ["mm.svg", "zipped.svgz"]
+
+
+def test_compare_deep_link_across_folders(ui):
+    ui.d.get(ui.url + "#dir=single&file=only.svg&vs=mm.svg&vsdir=sub")
+    ui.wait(lambda: ui.by_id("v-name").text == "only.svg ⇄ /sub/mm.svg")
+    assert ui.visible_panes() == 2
 
 
 def test_sidebar_opens_files_and_follows_the_viewer(ui):
@@ -957,9 +1010,8 @@ def test_sidebar_files_dont_wait_for_parent_folders(ui, monkeypatch):
 
 def test_current_folder_can_be_folded(ui):
     ui.d.get(ui.url + "#dir=single")  # only files, no subfolders: still foldable
-    ui.wait(lambda: [n for n, *_ in side_files(ui)] == ["only.svg"])
-    node = next(r for r in ui.d.find_elements(By.CSS_SELECTOR, "#tree .row:not(.file)")
-                if r.find_element(By.CSS_SELECTOR, ".label").text == "single")
+    ui.wait(lambda: files_in(ui, "single") == ["only.svg"])
+    node = tree_node(ui, "single")
     assert node.find_element(By.CSS_SELECTOR, ".twisty").value_of_css_property("visibility") == "visible"
     visible = lambda: side_row(ui, "only.svg").is_displayed()
     node.click()  # the current folder: folds

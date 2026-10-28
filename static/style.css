@@ -96,7 +96,7 @@ body.no-side #side { display: none; }
 #tree .label { overflow: hidden; text-overflow: ellipsis; }
 #tree li.closed > ul { display: none; }
 
-/* the current folder's files */
+/* the files of folders opened in the tree */
 #tree .row.file { gap: 5px; }
 #tree .row.file .mini {
   width: 18px; height: 18px;

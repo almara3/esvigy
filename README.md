@@ -38,10 +38,10 @@ doesn't quit the browser, so quit it with Cmd+Q (or press Ctrl+C in the terminal
 
 ## Features
 
-- Folder tree in the sidebar, thumbnail grid in the main panel. The tree also lists the current
-  folder's files (tiny thumbnail, full name on hover); in the viewer the open file is highlighted, and in
-  compare mode a click puts a file on side B, Shift+click on side A. Drag the sidebar's right edge to
-  widen it (double-click it for the default width).
+- Folder tree in the sidebar, thumbnail grid in the main panel. The tree also lists the files of every
+  folder you opened (tiny thumbnail, full name on hover); in the viewer the open file is highlighted, and in
+  compare mode a click puts a file on side B, Shift+click on side A, also from another folder. Drag the
+  sidebar's right edge to widen it (double-click it for the default width).
 - Thumbnails are rendered once by the browser in a hidden frame (its own process, so the UI never freezes), two at a time, visible ones first,
   and cached in `~/.cache/esvigy/thumbs` (keyed on path + mtime + size), so a
   folder you've seen before opens instantly
@@ -58,7 +58,7 @@ doesn't quit the browser, so quit it with Cmd+Q (or press Ctrl+C in the terminal
 - **Compare**: Ctrl-click (Cmd-click on macOS) two thumbnails and press *Compare* (or `c`), or press `c` in the viewer.
   Side by side or stacked (`l`), with pan/zoom linked between both (`y`). Each pane has its own ‹ › in its label; ←/→ step B,
   Shift+←/→ step A, and ↑/↓ or the top-bar ‹ › step both together. Both sides may show the same file, e.g. two
-  parts of one figure (unlink with `y` to zoom them separately). `c` goes back to a single file. The URL (`#file=a.svg&vs=b.svg`) is shareable.
+  parts of one figure (unlink with `y` to zoom them separately). `c` goes back to a single file. The URL (`#file=a.svg&vs=b.svg`, plus `&vsdir=<folder>` if B is in another folder) is shareable.
 - Table view (`t`): full file names, dimensions, size and date; click a column header to sort, click again to reverse
 - File names get two lines in the grid (full name on hover)
 - **PDF**: drawn by the bundled pdf.js (`static/vendor/pdfjs`, Mozilla, Apache-2.0),
