@@ -278,6 +278,8 @@ function renderNodeFiles(node) {
       const mini = el("img", "mini");
       mini.alt = "";
       mini.decoding = "async";
+      mini.draggable = false;
+      row.draggable = true;
       row.append(el("span", "twisty"), mini, el("span", "label", f.name), el("span", "ab"));
       row._file = f;
       const li = el("li");
@@ -449,6 +451,35 @@ $("v-copy").addEventListener("click", (e) => {
   copyPath(e.currentTarget, files.map(filePath));
 });
 
+// ---------------------------------------------------------------- dragging files out
+// Dragging a card or a sidebar file hands the file itself to the drop target (file manager,
+// desktop, editors), not its thumbnail. Firefox passes a file:// URI list on to the system;
+// Chromium copies the file from a DownloadURL (only one file). Dragging one of the two
+// Ctrl-selected cards drags both.
+
+function fileUri(path) {
+  path = path.replace(/\\/g, "/");  // Windows: C:\a\b -> /C:/a/b
+  if (!path.startsWith("/")) path = "/" + path;
+  return "file://" + path.split("/").map(encodeURIComponent).join("/").replace(/^\/([A-Za-z])%3A\//, "/$1:/");
+}
+const MIME = { svg: "image/svg+xml", pdf: "application/pdf", tiff: "image/tiff" };
+
+document.addEventListener("dragstart", (e) => {
+  const src = e.target.closest?.(".card, #tree .row.file");
+  if (!src?._file) return;
+  const f = src._file;
+  const files = src.classList.contains("card") && selected.includes(f) ? [...selected] : [f];
+  const dt = e.dataTransfer;
+  dt.clearData();
+  dt.effectAllowed = "copy";
+  dt.setData("text/uri-list", files.map((g) => fileUri(filePath(g))).join("\r\n"));
+  // Paths as text (for a drop into a terminal), unless unsafe there; see CONTROL_CHARS.
+  const paths = files.map(filePath);
+  if (!paths.some((p) => CONTROL_CHARS.test(p))) dt.setData("text/plain", paths.join("\n"));
+  const type = MIME[f.kind] || "application/octet-stream";
+  dt.setData("DownloadURL", type + ":" + f.name + ":" + new URL(fileUrl(f), location.href).href);
+});
+
 function renderGrid() {
   state.view = shownFiles(state.files);
   observer.disconnect();
@@ -462,9 +493,11 @@ function renderGrid() {
     card.dataset.i = i;
     const pic = el("div", "pic");
     pic.dataset.type = fileType(f);
+    card.draggable = true;  // drags the file, not the thumbnail; see "dragging files out"
     const img = el("img");
     img.alt = "";
     img.decoding = "async";
+    img.draggable = false;
     pic.append(img);
     const meta = el("div", "meta");
     meta.append(el("span", "dims", fmtDims(f)), el("span", "size", fmtSize(f.size)),
