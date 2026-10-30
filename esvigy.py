@@ -730,16 +730,15 @@ class Handler(BaseHTTPRequestHandler):
         paths = [self.resolve(root, r) for r in rels]
         if not all(p and p.is_file() and p.name.lower().endswith(DOC_EXTS) for p in paths):
             return self.fail(HTTPStatus.NOT_FOUND)
-        cmd = clipboard_cmd()
+        cmd = clipboard_cmd(paths)
         if cmd is None:
             return self.fail(HTTPStatus.NOT_IMPLEMENTED, "copying files needs xclip (X11) or wl-copy (Wayland)")
-        args, kde = cmd
-        uris = [p.as_uri() for p in paths]  # percent-encoded: no line breaks or control codes
-        data = "\r\n".join(uris) if kde else "\n".join(["copy"] + uris)
+        args, data, env = cmd
         try:
-            # Both programs stay in the background, owning the clipboard, and return at once.
-            subprocess.run(args, input=data.encode(), stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=5, check=True)
+            # xclip and wl-copy stay in the background, owning the clipboard, and return at once;
+            # PowerShell can take a few seconds to start.
+            subprocess.run(args, input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           env={**os.environ, **env}, timeout=15, check=True)
         except (OSError, subprocess.SubprocessError):
             return self.fail(HTTPStatus.INTERNAL_SERVER_ERROR, "the clipboard program failed")
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -836,11 +835,16 @@ def find_program(name):
     return None
 
 
+def powershell(script):
+    """Command line that runs `script` in Windows' built-in PowerShell, or None."""
+    ps = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    return [str(ps), "-NoProfile", "-NonInteractive", "-STA", "-Command", script] if ps.is_file() else None
+
+
 def folder_dialog_cmd(start):
     """Command line (with the program's full path) for the desktop's folder picker, or None."""
     if sys.platform == "win32":
-        ps = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-        return [str(ps), "-NoProfile", "-NonInteractive", "-STA", "-Command", WIN_DIALOG] if ps.is_file() else None
+        return powershell(WIN_DIALOG)
     if sys.platform == "darwin":
         return ["/usr/bin/osascript", "-e", MAC_DIALOG] if Path("/usr/bin/osascript").is_file() else None
     if exe := find_program("zenity"):
@@ -850,21 +854,46 @@ def folder_dialog_cmd(start):
     return None
 
 
-def clipboard_cmd():
-    """(command line, data format) that puts files on the desktop's clipboard, or None.
+# The file list goes in through the environment as JSON (ASCII only), never into a script's source.
+# macOS: Finder pastes file URLs from the general pasteboard; JXA can write several at once.
+MAC_COPY = ("ObjC.import('AppKit'); "
+            "var files = JSON.parse($.NSProcessInfo.processInfo.environment.objectForKey('ESVIGY_FILES').js); "
+            "var pb = $.NSPasteboard.generalPasteboard; pb.clearContents; "
+            "if (!pb.writeObjects($(files.map(function (p) { return $.NSURL.fileURLWithPath(p); })))) "
+            "throw new Error('pasteboard refused');")
+# Windows: Explorer pastes a file drop list. SetFileDropList keeps the data after PowerShell exits.
+WIN_COPY = ("$ErrorActionPreference = 'Stop'; "
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$l = New-Object System.Collections.Specialized.StringCollection; "
+            "foreach ($p in (ConvertFrom-Json $env:ESVIGY_FILES)) { [void]$l.Add($p) }; "
+            "[System.Windows.Forms.Clipboard]::SetFileDropList($l)")
 
-    The command reads the list from stdin. File managers paste the files themselves: GNOME's
-    and its relatives' (Nemo, Caja, Thunar) from x-special/gnome-copied-files, KDE's from a URI list.
-    Linux and the BSDs only, with xclip (X11) or wl-copy (Wayland).
+
+def clipboard_cmd(paths):
+    """(command line, stdin bytes, extra environment) that put the files `paths` (absolute Paths)
+    on the desktop's clipboard, for pasting in a file manager; or None.
+
+    Built in on macOS (osascript) and Windows (PowerShell). On Linux and the BSDs it needs xclip
+    (X11) or wl-copy (Wayland); GNOME's file manager and its relatives (Nemo, Caja, Thunar) paste
+    from x-special/gnome-copied-files, KDE's from a URI list.
     """
-    if sys.platform in ("win32", "darwin"):
-        return None
-    kde = "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
-    mime = "text/uri-list" if kde else "x-special/gnome-copied-files"
+    if sys.platform == "darwin":
+        if not Path("/usr/bin/osascript").is_file():
+            return None
+        return (["/usr/bin/osascript", "-l", "JavaScript", "-e", MAC_COPY], b"",
+                {"ESVIGY_FILES": json.dumps([str(p) for p in paths])})
+    if sys.platform == "win32":
+        cmd = powershell(WIN_COPY)
+        return cmd and (cmd, b"", {"ESVIGY_FILES": json.dumps([str(p) for p in paths])})
+    uris = [p.as_uri() for p in paths]  # percent-encoded: no line breaks or control codes
+    if "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper():
+        mime, data = "text/uri-list", "\r\n".join(uris)
+    else:
+        mime, data = "x-special/gnome-copied-files", "\n".join(["copy"] + uris)
     if os.environ.get("WAYLAND_DISPLAY") and (exe := find_program("wl-copy")):
-        return [exe, "--type", mime], kde
+        return [exe, "--type", mime], data.encode(), {}
     if os.environ.get("DISPLAY") and (exe := find_program("xclip")):
-        return [exe, "-selection", "clipboard", "-target", mime], kde
+        return [exe, "-selection", "clipboard", "-target", mime], data.encode(), {}
     return None
 
 

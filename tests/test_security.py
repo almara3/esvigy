@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -570,8 +571,13 @@ def test_chromium_app_window_gets_its_own_process_group(tmp_path):
 # /api/copy runs a clipboard program with the files it is given; only files below the root may go.
 
 def fake_clipboard(monkeypatch, kde=False):
+    """Pretend to be on X11 with xclip; return the data each run of it got."""
     runs = []
-    monkeypatch.setattr(esvigy, "clipboard_cmd", lambda: (["/usr/bin/xclip"], kde))
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "KDE" if kde else "X-Cinnamon")
+    monkeypatch.setattr(esvigy, "find_program", lambda name: "/usr/bin/xclip" if name == "xclip" else None)
     monkeypatch.setattr(esvigy.subprocess, "run", lambda args, input, **k: runs.append(input.decode()))
     return runs
 
@@ -635,28 +641,63 @@ def test_copy_rejects_malformed_requests(server, monkeypatch, body):
 
 
 def test_copy_without_clipboard_program_says_what_to_install(server, monkeypatch):
-    monkeypatch.setattr(esvigy, "clipboard_cmd", lambda: None)
+    monkeypatch.setattr(esvigy, "clipboard_cmd", lambda paths: None)
     r = copy(server, ["a.svg"])
     assert r.status == 501 and b"xclip" in r.body
 
 
+GNOME = "x-special/gnome-copied-files"
+
+
 @pytest.mark.parametrize("env, found, expected", [
     ({"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "X-Cinnamon"}, {"xclip"},
-     (["/bin/xclip", "-selection", "clipboard", "-target", "x-special/gnome-copied-files"], False)),
+     ["/bin/xclip", "-selection", "clipboard", "-target", GNOME]),
     ({"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "KDE"}, {"xclip"},
-     (["/bin/xclip", "-selection", "clipboard", "-target", "text/uri-list"], True)),
-    ({"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"}, {"xclip", "wl-copy"},
-     (["/bin/wl-copy", "--type", "x-special/gnome-copied-files"], False)),
+     ["/bin/xclip", "-selection", "clipboard", "-target", "text/uri-list"]),
+    ({"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"}, {"xclip", "wl-copy"}, ["/bin/wl-copy", "--type", GNOME]),
     ({"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"}, {"xclip"},  # XWayland
-     (["/bin/xclip", "-selection", "clipboard", "-target", "x-special/gnome-copied-files"], False)),
+     ["/bin/xclip", "-selection", "clipboard", "-target", GNOME]),
     ({"DISPLAY": ":0"}, set(), None),
     ({}, {"xclip"}, None),
 ])
-def test_clipboard_cmd(monkeypatch, env, found, expected):
+def test_clipboard_cmd_on_linux(monkeypatch, env, found, expected):
     monkeypatch.setattr(esvigy.sys, "platform", "linux")
     for var in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP"):
         monkeypatch.delenv(var, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(esvigy, "find_program", lambda name: "/bin/" + name if name in found else None)
-    assert esvigy.clipboard_cmd() == expected
+    cmd = esvigy.clipboard_cmd([Path("/x/a b.svg")])
+    assert (cmd and cmd[0]) == expected
+    if cmd:
+        kde = "KDE" in env.get("XDG_CURRENT_DESKTOP", "")
+        assert cmd[1:] == (b"file:///x/a%20b.svg" if kde else b"copy\nfile:///x/a%20b.svg", {})
+
+
+# Names with quotes, newlines, $ and non-ASCII must reach the script as data, never as code.
+ODD = [Path("/Users/me/it's \"$(rm -rf)\"\n`x`.svg"), Path("/Users/me/plot ä.pdf")]
+
+
+def test_clipboard_cmd_on_macos_passes_files_as_json(monkeypatch):
+    monkeypatch.setattr(esvigy.sys, "platform", "darwin")
+    monkeypatch.setattr(esvigy.Path, "is_file", lambda self: str(self) == "/usr/bin/osascript")
+    args, data, env = esvigy.clipboard_cmd(ODD)
+    assert args == ["/usr/bin/osascript", "-l", "JavaScript", "-e", esvigy.MAC_COPY]
+    assert data == b"" and env["ESVIGY_FILES"].isascii()
+    assert json.loads(env["ESVIGY_FILES"]) == [str(p) for p in ODD]
+
+
+def test_clipboard_cmd_on_windows_passes_files_as_json(monkeypatch, tmp_path):
+    ps = tmp_path / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    ps.parent.mkdir(parents=True)
+    ps.write_bytes(b"")
+    monkeypatch.setattr(esvigy.sys, "platform", "win32")
+    monkeypatch.setenv("SystemRoot", str(tmp_path))
+    files = [Path(r"C:\Users\me\it's $env:x.svg"), Path(r"C:\Users\me\[a]*.pdf")]  # [ ] * are wildcards in -Path
+    args, data, env = esvigy.clipboard_cmd(files)
+    assert args == [str(ps), "-NoProfile", "-NonInteractive", "-STA", "-Command", esvigy.WIN_COPY]
+    assert data == b"" and env["ESVIGY_FILES"].isascii()
+    assert json.loads(env["ESVIGY_FILES"]) == [str(p) for p in files]
+    ps.unlink()
+    assert esvigy.clipboard_cmd(files) is None
+

@@ -281,7 +281,11 @@ def test_copy_both_paths_in_compare_mode(ui):
 def clipboard(monkeypatch):
     """What /api/copy would put on the clipboard; the server runs in this process."""
     runs = []
-    monkeypatch.setattr(esvigy, "clipboard_cmd", lambda: (["/usr/bin/xclip"], False))
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", "X-Cinnamon")
+    monkeypatch.setattr(esvigy, "find_program", lambda name: "/usr/bin/xclip" if name == "xclip" else None)
     monkeypatch.setattr(esvigy.subprocess, "run", lambda args, input, **k: runs.append(input.decode()))
     return runs
 
