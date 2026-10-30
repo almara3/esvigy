@@ -1315,6 +1315,7 @@ function toggleSide() {
   prefs.set("side", document.body.classList.contains("no-side") ? "0" : "1");
 }
 $("toggle-side").addEventListener("click", toggleSide);
+$("v-side").addEventListener("click", toggleSide);
 function refresh() {
   listCache.clear();
   dirCache.clear();
