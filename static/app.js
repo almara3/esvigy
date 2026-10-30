@@ -451,34 +451,59 @@ $("v-copy").addEventListener("click", (e) => {
   copyPath(e.currentTarget, files.map(filePath));
 });
 
-// ---------------------------------------------------------------- dragging files out
-// Dragging a card or a sidebar file hands the file itself to the drop target (file manager,
-// desktop, editors), not its thumbnail. Firefox passes a file:// URI list on to the system;
-// Chromium copies the file from a DownloadURL (only one file). Dragging one of the two
-// Ctrl-selected cards drags both.
-
-function fileUri(path) {
-  path = path.replace(/\\/g, "/");  // Windows: C:\a\b -> /C:/a/b
-  if (!path.startsWith("/")) path = "/" + path;
-  return "file://" + path.split("/").map(encodeURIComponent).join("/").replace(/^\/([A-Za-z])%3A\//, "/$1:/");
-}
-const MIME = { svg: "image/svg+xml", pdf: "application/pdf", tiff: "image/tiff" };
+// ---------------------------------------------------------------- dragging and copying files
+// Browsers never hand local files to other programs (Chromium turns a dragged file:// URI into
+// about:blank#blocked, Firefox keeps it to itself), so:
+// - dragging a card or a sidebar file drops its full path as text (not its thumbnail);
+// - Ctrl+C asks the server to put the files themselves on the clipboard, to paste in a file manager.
+// Both take the two Ctrl-selected cards when one of them is dragged or nothing else is focused.
 
 document.addEventListener("dragstart", (e) => {
   const src = e.target.closest?.(".card, #tree .row.file");
   if (!src?._file) return;
   const f = src._file;
-  const files = src.classList.contains("card") && selected.includes(f) ? [...selected] : [f];
-  const dt = e.dataTransfer;
-  dt.clearData();
-  dt.effectAllowed = "copy";
-  dt.setData("text/uri-list", files.map((g) => fileUri(filePath(g))).join("\r\n"));
-  // Paths as text (for a drop into a terminal), unless unsafe there; see CONTROL_CHARS.
-  const paths = files.map(filePath);
-  if (!paths.some((p) => CONTROL_CHARS.test(p))) dt.setData("text/plain", paths.join("\n"));
-  const type = MIME[f.kind] || "application/octet-stream";
-  dt.setData("DownloadURL", type + ":" + f.name + ":" + new URL(fileUrl(f), location.href).href);
+  const paths = (src.classList.contains("card") && selected.includes(f) ? selected : [f]).map(filePath);
+  // Never as text if unsafe in a terminal; see CONTROL_CHARS.
+  if (paths.some((p) => CONTROL_CHARS.test(p))) return e.preventDefault();
+  e.dataTransfer.clearData();
+  e.dataTransfer.effectAllowed = "copy";
+  e.dataTransfer.setData("text/plain", paths.join("\n"));
 });
+
+let noteTimer = 0;
+function note(msg) {
+  const n = $("note");
+  n.textContent = msg;
+  n.hidden = false;
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(() => { n.hidden = true; }, 2500);
+}
+
+async function copyFiles(files) {
+  let msg;
+  try {
+    const r = await fetch(BASE + "api/copy", {
+      method: "POST", headers: { "X-Esvigy": "1", "Content-Type": "application/json" },
+      body: JSON.stringify(files.map((f) => joinPath(f.dir, f.name))),
+    });
+    msg = r.ok ? `Copied ${files.length === 1 ? "the file" : files.length + " files"}: paste in a file manager`
+               : "Not copied: " + (await r.text() || r.status);
+  } catch {
+    msg = "Not copied: esvigy isn't running";
+  }
+  note(msg);
+}
+
+// The files Ctrl+C copies: those shown in the viewer, else the focused card (or the selection it
+// belongs to), else the two selected cards.
+function filesToCopy() {
+  if (!viewer.hidden) {
+    return state.cmp >= 0 ? [state.view[state.current], state.bview[state.cmp]] : [state.view[state.current]];
+  }
+  const f = document.activeElement?.closest?.(".card")?._file;
+  if (f && !selected.includes(f)) return [f];
+  return selected.length ? [...selected] : [];
+}
 
 function renderGrid() {
   state.view = shownFiles(state.files);
@@ -1318,8 +1343,15 @@ async function openFolder() {
 $("open").addEventListener("click", openFolder);
 
 document.addEventListener("keydown", (e) => {
-  if (e.ctrlKey || e.altKey || e.metaKey) return;
   const typing = e.target.matches("input[type=search], input[type=text]");
+  // Ctrl+C (Cmd+C): copy files, unless text is selected or being typed.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === "c" && !typing
+      && !getSelection().toString()) {
+    const files = filesToCopy();
+    if (files.length) { e.preventDefault(); copyFiles(files); }
+    return;
+  }
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
   if (typing) {
     if (e.key === "Escape") { e.target.value = ""; e.target.blur(); renderGrid(); }
     if (e.key === "Enter") grid.querySelector(".card")?.focus();

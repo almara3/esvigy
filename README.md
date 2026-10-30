@@ -59,6 +59,10 @@ doesn't quit the browser, so quit it with Cmd+Q (or press Ctrl+C in the terminal
   Side by side or stacked (`l`), with pan/zoom linked between both (`y`). Each pane has its own ‹ › in its label; ←/→ step B,
   Shift+←/→ step A, and ↑/↓ or the top-bar ‹ › step both together. Both sides may show the same file, e.g. two
   parts of one figure (unlink with `y` to zoom them separately). `c` goes back to a single file. The URL (`#file=a.svg&vs=b.svg`, plus `&vsdir=<folder>` if B is in another folder) is shareable.
+- **Copy files**: Ctrl+C (Cmd+C) on a thumbnail, on the two Ctrl-selected ones, or in the viewer
+  puts the files themselves on the clipboard; paste them in a file manager or on the desktop.
+  Needs xclip (X11) or wl-copy (Wayland); not yet on macOS or Windows. Browsers never hand files
+  to other programs, so dragging a thumbnail (or a sidebar file) drops its full path as text.
 - Table view (`t`): full file names, dimensions, size and date; click a column header to sort, click again to reverse
 - File names get two lines in the grid (full name on hover)
 - **PDF**: drawn by the bundled pdf.js (`static/vendor/pdfjs`, Mozilla, Apache-2.0),

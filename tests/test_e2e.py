@@ -277,6 +277,50 @@ def test_copy_both_paths_in_compare_mode(ui):
 
 
 
+@pytest.fixture
+def clipboard(monkeypatch):
+    """What /api/copy would put on the clipboard; the server runs in this process."""
+    runs = []
+    monkeypatch.setattr(esvigy, "clipboard_cmd", lambda: (["/usr/bin/xclip"], False))
+    monkeypatch.setattr(esvigy.subprocess, "run", lambda args, input, **k: runs.append(input.decode()))
+    return runs
+
+
+def test_ctrl_c_copies_the_files_themselves(ui, clipboard):
+    uri = lambda *p: ui.root.resolve().joinpath(*p).as_uri()  # noqa: E731
+    ui.card("a.svg").send_keys(Keys.CONTROL, "c")  # the focused card
+    ui.wait(lambda: clipboard == ["copy\n" + uri("a.svg")])
+    assert "paste in a file manager" in ui.by_id("note").text
+
+    ActionChains(ui.d).key_down(Keys.CONTROL).click(ui.card("a.svg")).click(ui.card("b.svg")) \
+        .key_up(Keys.CONTROL).perform()
+    ui.card("b.svg").send_keys(Keys.CONTROL, "c")  # one of the selected: both go
+    ui.wait(lambda: len(clipboard) == 2)
+    assert clipboard[1] == f"copy\n{uri('a.svg')}\n{uri('b.svg')}"
+
+    ui.d.get(ui.url + "#dir=sub&file=mm.svg")
+    ui.wait(lambda: ui.by_id("v-name").text == "mm.svg")
+    ActionChains(ui.d).key_down(Keys.CONTROL).send_keys("c").key_up(Keys.CONTROL).perform()
+    ui.wait(lambda: len(clipboard) == 3)
+    assert clipboard[2] == "copy\n" + uri("sub", "mm.svg")
+
+
+def test_ctrl_c_while_typing_copies_text_not_files(ui, clipboard):
+    f = ui.by_id("filter")
+    f.send_keys("a.svg", Keys.CONTROL, "a")
+    f.send_keys(Keys.CONTROL, "c")
+    time.sleep(0.3)
+    assert clipboard == []
+
+
+def test_dragging_a_card_drags_its_path(ui):
+    data = ui.js("""const dt = new DataTransfer();
+                    const img = arguments[0].querySelector("img");
+                    img.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));
+                    return [img.draggable, dt.types, dt.getData("text/plain")];""", ui.card("a.svg"))
+    assert data == [False, ["text/plain"], str(ui.root.resolve() / "a.svg")]
+
+
 def pasted_text(ui):
     """The clipboard, pasted into a textarea (an <input> would drop line breaks)."""
     ui.js("""document.getElementById("paste")?.remove();

@@ -5,6 +5,7 @@ or processes (who can connect to any port), web pages open in the same browser (
 can make requests to 127.0.0.1 but not read the answers), and the SVG files themselves.
 """
 
+import json
 import os
 import socket
 import shutil
@@ -33,6 +34,7 @@ ENDPOINTS = [
     ("HEAD", "/file/a.svg"),
     ("GET", f"/thumb/{KEY}.webp"),
     ("POST", "/api/open"),
+    ("POST", "/api/copy"),
     ("PUT", f"/thumb/{KEY}.webp"),
 ]
 
@@ -562,3 +564,99 @@ def test_chromium_app_window_gets_its_own_process_group(tmp_path):
         proc.kill()
         esvigy.remove_profile(profile, proc)
     assert not os.path.exists(profile)
+
+
+# ---------------------------------------------------------------- copying files to the clipboard
+# /api/copy runs a clipboard program with the files it is given; only files below the root may go.
+
+def fake_clipboard(monkeypatch, kde=False):
+    runs = []
+    monkeypatch.setattr(esvigy, "clipboard_cmd", lambda: (["/usr/bin/xclip"], kde))
+    monkeypatch.setattr(esvigy.subprocess, "run", lambda args, input, **k: runs.append(input.decode()))
+    return runs
+
+
+def copy(server, files, headers=PUT_HEADERS):
+    body = files if isinstance(files, bytes) else json.dumps(files).encode()
+    return server.request("POST", "/api/copy", body=body, headers=headers)
+
+
+def test_copy_puts_file_uris_on_the_clipboard(server, monkeypatch):
+    runs = fake_clipboard(monkeypatch)
+    assert copy(server, ["a.svg", "sub/mm.svg"]).status == 204
+    root = server.root.resolve()
+    assert runs == [f"copy\n{(root / 'a.svg').as_uri()}\n{(root / 'sub' / 'mm.svg').as_uri()}"]
+
+
+def test_copy_for_kde_is_a_uri_list(server, monkeypatch):
+    runs = fake_clipboard(monkeypatch, kde=True)
+    assert copy(server, ["a.svg", "b.svg"]).status == 204
+    assert runs[0].split("\r\n") == [(server.root.resolve() / n).as_uri() for n in ("a.svg", "b.svg")]
+
+
+def test_copied_names_cannot_inject_lines(server, monkeypatch):
+    (server.root / "x\ncut\nfile:.svg").write_text('<svg width="1" height="1"/>')
+    runs = fake_clipboard(monkeypatch)
+    assert copy(server, ["x\ncut\nfile:.svg"]).status == 204
+    assert runs[0].count("\n") == 1 and "%0A" in runs[0]
+
+
+def test_copy_without_custom_header_is_refused(server, monkeypatch):
+    runs = fake_clipboard(monkeypatch)
+    assert copy(server, ["a.svg"], headers={}).status == 403
+    assert runs == []
+
+
+@pytest.mark.parametrize("files", [
+    ["../outside.svg"], ["/etc/passwd"], ["notes.txt"], ["missing.svg"], ["sub"], ["a.svg", "../outside.svg"],
+])
+def test_copy_only_takes_documents_inside_the_root(server, tmp_path, monkeypatch, files):
+    (tmp_path / "outside.svg").write_text('<svg width="1" height="1"/>')
+    runs = fake_clipboard(monkeypatch)
+    assert copy(server, files).status == 404
+    assert runs == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks")
+def test_copy_refuses_symlinks_out_of_root(server, tmp_path, monkeypatch):
+    (tmp_path / "secret.svg").write_text('<svg width="7" height="7"/>')
+    (server.root / "link.svg").symlink_to(tmp_path / "secret.svg")
+    runs = fake_clipboard(monkeypatch)
+    assert copy(server, ["link.svg"]).status == 404
+    assert runs == []
+
+
+@pytest.mark.parametrize("body", [b"not json", b"{}", b"[]", b"[1]", b'"a.svg"',
+                                  json.dumps(["a.svg"] * (esvigy.MAX_COPY_FILES + 1)).encode()])
+def test_copy_rejects_malformed_requests(server, monkeypatch, body):
+    runs = fake_clipboard(monkeypatch)
+    assert copy(server, body).status == 400
+    assert runs == []
+
+
+def test_copy_without_clipboard_program_says_what_to_install(server, monkeypatch):
+    monkeypatch.setattr(esvigy, "clipboard_cmd", lambda: None)
+    r = copy(server, ["a.svg"])
+    assert r.status == 501 and b"xclip" in r.body
+
+
+@pytest.mark.parametrize("env, found, expected", [
+    ({"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "X-Cinnamon"}, {"xclip"},
+     (["/bin/xclip", "-selection", "clipboard", "-target", "x-special/gnome-copied-files"], False)),
+    ({"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "KDE"}, {"xclip"},
+     (["/bin/xclip", "-selection", "clipboard", "-target", "text/uri-list"], True)),
+    ({"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"}, {"xclip", "wl-copy"},
+     (["/bin/wl-copy", "--type", "x-special/gnome-copied-files"], False)),
+    ({"WAYLAND_DISPLAY": "wayland-0", "DISPLAY": ":0"}, {"xclip"},  # XWayland
+     (["/bin/xclip", "-selection", "clipboard", "-target", "x-special/gnome-copied-files"], False)),
+    ({"DISPLAY": ":0"}, set(), None),
+    ({}, {"xclip"}, None),
+])
+def test_clipboard_cmd(monkeypatch, env, found, expected):
+    monkeypatch.setattr(esvigy.sys, "platform", "linux")
+    for var in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP"):
+        monkeypatch.delenv(var, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(esvigy, "find_program", lambda name: "/bin/" + name if name in found else None)
+    assert esvigy.clipboard_cmd() == expected

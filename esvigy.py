@@ -46,6 +46,8 @@ A4_PX = (793.701, 1122.52)
 HEAD_BYTES = 64 * 1024
 MAX_THUMB_BYTES = 4 * 1024 * 1024
 MAX_META_BYTES = 1024
+MAX_COPY_FILES = 100  # files per /api/copy request (the UI sends at most two)
+MAX_COPY_BYTES = 64 * 1024
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                 ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
                 ".mjs": "text/javascript; charset=utf-8", ".wasm": "application/wasm"}
@@ -554,9 +556,11 @@ class Handler(BaseHTTPRequestHandler):
         path = self.write_path()
         if path is None:
             return
-        if path != "/api/open":
-            return self.fail(HTTPStatus.NOT_FOUND)
-        self.api_open()
+        if path == "/api/open":
+            return self.api_open()
+        if path == "/api/copy":
+            return self.api_copy()
+        self.fail(HTTPStatus.NOT_FOUND)
 
     def do_PUT(self):
         path = self.write_path()
@@ -705,6 +709,43 @@ class Handler(BaseHTTPRequestHandler):
             self.server.root = chosen.resolve()
         self.send_json({"root": self.server.root.name or str(self.server.root)})
 
+    def api_copy(self):
+        """Put files (a JSON list of paths relative to the root) on the clipboard, for pasting
+        into a file manager. Browsers can't: they never hand local files to other programs."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if not 0 < length <= MAX_COPY_BYTES:
+            self.close_connection = True  # the body (if any) is left unread
+            return self.fail(HTTPStatus.BAD_REQUEST)
+        try:
+            rels = json.loads(self.rfile.read(length))
+        except ValueError:
+            return self.fail(HTTPStatus.BAD_REQUEST)
+        if not isinstance(rels, list) or not 0 < len(rels) <= MAX_COPY_FILES \
+                or not all(isinstance(r, str) for r in rels):
+            return self.fail(HTTPStatus.BAD_REQUEST)
+        root = self.server.root
+        paths = [self.resolve(root, r) for r in rels]
+        if not all(p and p.is_file() and p.name.lower().endswith(DOC_EXTS) for p in paths):
+            return self.fail(HTTPStatus.NOT_FOUND)
+        cmd = clipboard_cmd()
+        if cmd is None:
+            return self.fail(HTTPStatus.NOT_IMPLEMENTED, "copying files needs xclip (X11) or wl-copy (Wayland)")
+        args, kde = cmd
+        uris = [p.as_uri() for p in paths]  # percent-encoded: no line breaks or control codes
+        data = "\r\n".join(uris) if kde else "\n".join(["copy"] + uris)
+        try:
+            # Both programs stay in the background, owning the clipboard, and return at once.
+            subprocess.run(args, input=data.encode(), stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=5, check=True)
+        except (OSError, subprocess.SubprocessError):
+            return self.fail(HTTPStatus.INTERNAL_SERVER_ERROR, "the clipboard program failed")
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def serve_file(self, rel, fix):
         p = self.resolve(self.server.root, rel)
         if p is None or not p.is_file() or not p.name.lower().endswith(DOC_EXTS):
@@ -806,6 +847,24 @@ def folder_dialog_cmd(start):
         return [exe, "--file-selection", "--directory", "--title=Open folder", f"--filename={start}/"]
     if exe := find_program("kdialog"):
         return [exe, "--getexistingdirectory", str(start)]
+    return None
+
+
+def clipboard_cmd():
+    """(command line, data format) that puts files on the desktop's clipboard, or None.
+
+    The command reads the list from stdin. File managers paste the files themselves: GNOME's
+    and its relatives' (Nemo, Caja, Thunar) from x-special/gnome-copied-files, KDE's from a URI list.
+    Linux and the BSDs only, with xclip (X11) or wl-copy (Wayland).
+    """
+    if sys.platform in ("win32", "darwin"):
+        return None
+    kde = "KDE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+    mime = "text/uri-list" if kde else "x-special/gnome-copied-files"
+    if os.environ.get("WAYLAND_DISPLAY") and (exe := find_program("wl-copy")):
+        return [exe, "--type", mime], kde
+    if os.environ.get("DISPLAY") and (exe := find_program("xclip")):
+        return [exe, "-selection", "clipboard", "-target", mime], kde
     return None
 
 
